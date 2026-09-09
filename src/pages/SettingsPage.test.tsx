@@ -11,6 +11,7 @@ const settings: AppSettings = {
   gamePath: null,
   customExecutablePath: "C:\\Games\\ZeroCompany.exe",
   retocPath: null,
+  sevenZipPath: null,
   logLevel: "normal",
   advancedPackageNames: false,
   reducedMotion: false,
@@ -21,6 +22,7 @@ function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Par
   return {
     settings,
     retoc: { found: true, path: "/bin/retoc", version: "retoc 0.1.5" },
+    sevenZip: { found: true, path: "C:\\Program Files\\7-Zip\\7z.exe", version: "7-Zip 24.09" },
     managedLibrary: { path: "C:\\ZCOM Mods", defaultPath: "C:\\Users\\Arc\\AppData\\Local\\ZCOM Mods", isDefault: false },
     movingLibrary: false,
     onChange: vi.fn(),
@@ -28,6 +30,7 @@ function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Par
     onPickGame: vi.fn(),
     onPickExecutable: vi.fn(),
     onPickRetoc: vi.fn(),
+    onPickSevenZip: vi.fn(),
     onMoveLibrary: vi.fn(),
     onUseDefaultLibrary: vi.fn(),
     onOpenLibrary: vi.fn(),

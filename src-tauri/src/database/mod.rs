@@ -488,6 +488,7 @@ pub fn settings(conn: &Connection) -> Result<AppSettings> {
         custom_executable_path: get_setting(conn, "custom_executable_path")?
             .filter(|path| !path.trim().is_empty()),
         retoc_path: get_setting(conn, "retoc_path")?,
+        seven_zip_path: get_setting(conn, "seven_zip_path")?.filter(|path| !path.trim().is_empty()),
         log_level: get_setting(conn, "log_level")?.unwrap_or_else(|| "normal".into()),
         advanced_package_names: bool_value("advanced_package_names")?,
         reduced_motion: bool_value("reduced_motion")?,
@@ -503,6 +504,10 @@ pub fn save_settings(conn: &Connection, value: &AppSettings) -> Result<()> {
             value.custom_executable_path.clone().unwrap_or_default(),
         ),
         ("retoc_path", value.retoc_path.clone().unwrap_or_default()),
+        (
+            "seven_zip_path",
+            value.seven_zip_path.clone().unwrap_or_default(),
+        ),
         ("log_level", value.log_level.clone()),
         (
             "advanced_package_names",

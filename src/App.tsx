@@ -13,10 +13,10 @@ import { InstallPage } from "./pages/InstallPage";
 import { ModsPage } from "./pages/ModsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AboutPage } from "./pages/AboutPage";
-import { backend, friendlyError } from "./services/backend";
-import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, DownloadProgress, ExistingModScan, FomodAnswer, FomodSession, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdate, ModUpdateReport, NexusAccount, NexusStatus, UpdateInfo } from "./types";
+import { backend, friendlyError, isChangedFileError } from "./services/backend";
+import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, DownloadProgress, ExistingModScan, FomodAnswer, FomodSession, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdate, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, UpdateInfo } from "./types";
 
-const defaultSettings: AppSettings = { gamePath: null, customExecutablePath: null, retocPath: null, logLevel: "normal", advancedPackageNames: false, reducedMotion: false, nexusAutoUpdateCheck: false };
+const defaultSettings: AppSettings = { gamePath: null, customExecutablePath: null, retocPath: null, sevenZipPath: null, logLevel: "normal", advancedPackageNames: false, reducedMotion: false, nexusAutoUpdateCheck: false };
 const defaultLinks: Links = { ue4ssDownload: "", nexusGame: "", nexusManager: "", project: "" };
 const defaultLoadOrder: LoadOrderState = { entries: [], ue4ssEntries: [], activeConflicts: [], potentialConflicts: [], unapplied: false };
 
@@ -58,6 +58,7 @@ export default function App() {
   const [loadOrder, setLoadOrder] = useState<LoadOrderState>(defaultLoadOrder);
   const [orderPreview, setOrderPreview] = useState<LoadOrderPreview | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [sevenZip, setSevenZip] = useState<ToolInfo | null>(null);
   const [managedLibrary, setManagedLibrary] = useState<ManagedLibraryInfo | null>(null);
   const [movingLibrary, setMovingLibrary] = useState(false);
   const [links, setLinks] = useState<Links>(defaultLinks);
@@ -93,6 +94,7 @@ export default function App() {
   const [discoveringExisting, setDiscoveringExisting] = useState(false);
   const [adoptingExisting, setAdoptingExisting] = useState(false);
   const [toast, setToast] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const toastTimer = useRef<number | null>(null);
   const updateCheckStarted = useRef(false);
   const modUpdateCheckStarted = useRef(false);
   const automaticDiscoveryStarted = useRef(false);
@@ -103,11 +105,29 @@ export default function App() {
   const installerRef = useRef<FomodSession | null>(null);
   const inspectAttempt = useRef(0);
 
-  const notify = (text: string, kind: "ok" | "error" = "ok") => { setToast({ text, kind }); window.setTimeout(() => setToast(null), 4500); };
+  /**
+   * Shows a message, and for a failure keeps it on screen until it is closed.
+   *
+   * A confirmation is worth a glance and disappears on its own. A failure is
+   * the only account of what went wrong, and dismissing it after a few seconds
+   * left users reporting an error they could not read, let alone quote. Every
+   * failure is also appended to the application log, so it can still be found
+   * after the message is closed.
+   */
+  const notify = (text: string, kind: "ok" | "error" = "ok") => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    setToast({ text, kind });
+    if (kind === "error") {
+      toastTimer.current = null;
+      void backend.reportInterfaceError(text, null, "notification").catch(() => undefined);
+      return;
+    }
+    toastTimer.current = window.setTimeout(() => setToast(null), 4500);
+  };
   const refresh = useCallback(async () => {
     try {
-      const [nextDashboard, nextMods, nextLoadOrder, nextSettings, nextLinks, nextNexus, nextModUpdates, nextManagedLibrary] = await Promise.all([backend.dashboard(), backend.mods(), backend.loadOrder(), backend.settings(), backend.links(), backend.nexusStatus(), backend.modUpdates(), backend.managedLibrary()]);
-      setDashboard(nextDashboard); setMods(nextMods); setLoadOrder(nextLoadOrder); setSettings(nextSettings); setLinks(nextLinks); setNexus(nextNexus); setModUpdates(nextModUpdates); setManagedLibrary(nextManagedLibrary);
+      const [nextDashboard, nextMods, nextLoadOrder, nextSettings, nextLinks, nextNexus, nextModUpdates, nextManagedLibrary, nextSevenZip] = await Promise.all([backend.dashboard(), backend.mods(), backend.loadOrder(), backend.settings(), backend.links(), backend.nexusStatus(), backend.modUpdates(), backend.managedLibrary(), backend.sevenZipStatus()]);
+      setDashboard(nextDashboard); setMods(nextMods); setLoadOrder(nextLoadOrder); setSettings(nextSettings); setLinks(nextLinks); setNexus(nextNexus); setModUpdates(nextModUpdates); setManagedLibrary(nextManagedLibrary); setSevenZip(nextSevenZip);
       document.documentElement.dataset.reduceMotion = String(nextSettings.reducedMotion);
     } catch (error) { notify(friendlyError(error), "error"); }
   }, []);
@@ -301,10 +321,29 @@ export default function App() {
     }
   }
   async function locateGame() { const picked = await open({ directory: true, multiple: false, title: "Locate Star Wars Zero Company" }); if (typeof picked === "string") { try { await backend.setGamePath(picked); await refresh(); notify("Game installation connected."); } catch (e) { notify(friendlyError(e), "error"); } } }
+  /**
+   * Installs one preview, offering the override when the mod being replaced
+   * has a deployed file that no longer matches what was recorded.
+   *
+   * A mod that keeps its own settings or data next to its scripts rewrites
+   * them whenever the game runs, so the guard fires on every later update.
+   * Refusing outright left such a mod impossible to upgrade, so the user is
+   * told which file changed and asked whether to overwrite it.
+   */
+  async function installOnce(preview: ModPreview) {
+    const name = names[preview.stagingId];
+    try {
+      return await backend.install(preview.stagingId, name, preview.replaces?.modId);
+    } catch (e) {
+      if (!isChangedFileError(e) || !preview.replaces) throw e;
+      if (!window.confirm(`${friendlyError(e)}\n\nUpdate ${preview.replaces.name} anyway? The changed file is not carried over: the new version's own copy takes its place, or it goes if the new version ships none.`)) throw e;
+      return await backend.install(preview.stagingId, name, preview.replaces.modId, true);
+    }
+  }
   async function install(preview: ModPreview) {
     setInstalling(preview.stagingId);
     try {
-      const mod = await backend.install(preview.stagingId, names[preview.stagingId], preview.replaces?.modId);
+      const mod = await installOnce(preview);
       notify(preview.replaces ? `${mod.name} replaced ${preview.replaces.name}.` : `${mod.name} installed safely.`);
       const remaining = previewsRef.current.filter(item => item.stagingId !== preview.stagingId);
       previewsRef.current = remaining;
@@ -322,7 +361,7 @@ export default function App() {
     });
     try {
       for (const preview of components) {
-        await backend.install(preview.stagingId, names[preview.stagingId], preview.replaces?.modId);
+        await installOnce(preview);
         completed += 1;
         const remaining = previewsRef.current.filter(item => item.stagingId !== preview.stagingId);
         previewsRef.current = remaining;
@@ -353,8 +392,58 @@ export default function App() {
     try { await backend.rename(mod.id, next.trim()); await refresh(); notify(`Renamed to ${next.trim()}.`); }
     catch (e) { notify(friendlyError(e), "error"); } finally { setBusyMod(null); }
   }
-  async function toggle(mod: ModSummary) { setBusyMod(mod.id); try { await backend.setEnabled(mod.id, !mod.enabled); await refresh(); notify(`${mod.name} ${mod.enabled ? "disabled" : "enabled"}.`); } catch (e) { notify(friendlyError(e), "error"); } finally { setBusyMod(null); } }
-  async function uninstall(mod: ModSummary) { if (!window.confirm(`Uninstall ${mod.name}? Its managed library copy and unchanged deployed files will be removed.`)) return; setBusyMod(mod.id); try { await backend.uninstall(mod.id); await refresh(); notify(`${mod.name} uninstalled.`); } catch (e) { notify(`${friendlyError(e)} The changed file was kept.`, "error"); } finally { setBusyMod(null); } }
+  /**
+   * Enables or disables a mod, offering the same override as removal when one
+   * of its deployed files no longer matches what was recorded. Without it a
+   * mod that writes its own settings could be neither disabled, updated, nor
+   * removed, which is what left users with an entry nothing worked on.
+   */
+  async function toggle(mod: ModSummary) {
+    setBusyMod(mod.id);
+    const done = () => notify(`${mod.name} ${mod.enabled ? "disabled" : "enabled"}.`);
+    try {
+      await backend.setEnabled(mod.id, !mod.enabled);
+      await refresh();
+      done();
+    } catch (e) {
+      if (!isChangedFileError(e)) { notify(friendlyError(e), "error"); return; }
+      if (!window.confirm(`${friendlyError(e)}\n\nDisable ${mod.name} anyway? The changed file is removed with the rest of the payload, and enabling the mod again restores the version it was installed with rather than this one.`)) {
+        notify(`${friendlyError(e)} The changed file was kept, and ${mod.name} is still enabled.`, "error");
+        return;
+      }
+      try { await backend.setEnabled(mod.id, false, true); await refresh(); done(); }
+      catch (retry) { notify(friendlyError(retry), "error"); }
+    } finally { setBusyMod(null); }
+  }
+  /**
+   * Removes a mod, and offers to remove it anyway when one of its deployed
+   * files no longer matches what was recorded.
+   *
+   * The guard exists so a file the user edited is never deleted silently, but
+   * a mod that writes its own settings or data trips it every time. Without
+   * the override the entry could be neither updated nor removed, which left
+   * the library with a mod there was no way to act on at all.
+   */
+  async function uninstall(mod: ModSummary) {
+    if (!window.confirm(`Uninstall ${mod.name}? Its managed library copy and unchanged deployed files will be removed.`)) return;
+    setBusyMod(mod.id);
+    try {
+      await backend.uninstall(mod.id);
+      await refresh();
+      notify(`${mod.name} uninstalled.`);
+    } catch (e) {
+      if (!isChangedFileError(e)) { notify(friendlyError(e), "error"); return; }
+      if (!window.confirm(`${friendlyError(e)}\n\nRemove ${mod.name} anyway? The changed file is deleted along with the rest of the mod.`)) {
+        notify(`${friendlyError(e)} The changed file was kept, and ${mod.name} is still installed.`, "error");
+        return;
+      }
+      try {
+        await backend.uninstall(mod.id, true);
+        await refresh();
+        notify(`${mod.name} uninstalled, including the changed file.`);
+      } catch (retry) { notify(friendlyError(retry), "error"); }
+    } finally { setBusyMod(null); }
+  }
   async function reconfigure(mod: ModSummary) {
     setBusyMod(mod.id);
     try {
@@ -547,11 +636,18 @@ export default function App() {
     {page === "home" && <HomePage data={dashboard} onInstall={() => setPage("install")} onDiagnose={() => setPage("diagnostics")} onLocate={locateGame} onOpenMods={() => void openFolder("mods")} onOpenGame={() => void openFolder("game")} onLaunchGame={() => void launchGame()} onGetUe4ss={() => openExternal(links.ue4ssDownload)} onInstallUe4ss={() => void installUe4ss()} busy={loading} launching={launching} canLaunch={dashboard.game.detected || !!settings.customExecutablePath} existingModsFound={existingPrompt ? (existingScan?.candidates.length ?? 0) + (existingScan?.unsupported.length ?? 0) : 0} onDismissExisting={() => setExistingPrompt(false)} onReviewExisting={() => { setExistingPrompt(false); setPage("mods"); setExistingReview(true); }} />}
     {page === "mods" && <ModsPage mods={mods} loadOrder={loadOrder} orderPreview={orderPreview} orderBusy={orderBusy} onPreviewOrder={ids => void previewOrder(ids)} onApplyOrder={ids => void applyOrder(ids)} onApplyUe4ssOrder={ids => void applyUe4ssOrder(ids)} onCancelOrder={() => setOrderPreview(null)} onBrowseNexus={() => openExternal(links.nexusGame)} busy={busyMod} onInstall={() => setPage("install")} onDiscover={() => void discoverExisting(true)} discovering={discoveringExisting} onToggle={toggle} onUninstall={uninstall} onReconfigure={mod => void reconfigure(mod)} onVerify={verify} onRename={rename} onOpenInstalled={mod => void openFolder(`installed:${mod.id}`)} onOpenSource={mod => void openFolder(`mod:${mod.id}`)} updates={modUpdates} checkingUpdates={checkingMods} canCheckUpdates={nexus?.hasKey ?? false} directDownload={nexus?.premium ?? false} onCheckUpdates={() => void checkModUpdates(true)} onUpdateMod={update => void updateMod(update)} onLinkMod={(mod, reference) => void linkMod(mod, reference)} onSetModChecked={(mod, checked) => void setModChecked(mod, checked)} onOpenModPage={mod => { if (mod.nexusUrl) openExternal(mod.nexusUrl); }} onSetHidden={(mod, hidden) => void setHidden(mod, hidden)} />}
     {page === "install" && <InstallPage previews={previews} names={names} loading={loading} installer={installer} installerRestored={restored} installerCanGoBack={answers.length > 0} onInstallerNext={answer => void answerInstaller(answer)} onInstallerBack={() => void backInstaller()} download={download} advanced={advanced} installing={installing} onAdvanced={() => setAdvanced(!advanced)} onName={(stagingId, name) => setNames(current => ({ ...current, [stagingId]: name }))} onChooseFile={() => void choose({ filters: [{ name: "Supported mods", extensions: ["zip", "7z", "rar", "pak", "utoc", "ucas"] }] })} onChooseFolder={() => void choose({ directory: true })} onInstall={mod => void install(mod)} onInstallAll={mods => void installAll(mods)} onInstallRuntime={mod => void installRuntimeFrom(mod)} onCancel={() => void discardPreviews()} />}
-    {page === "diagnostics" && <DiagnosticsPage report={diagnostics} loading={loading} onRun={() => void runDiagnostics()} onCopy={() => void navigator.clipboard.writeText(diagnostics?.text ?? "").then(() => notify("Diagnostic report copied."))} />}
-    {page === "settings" && <SettingsPage settings={settings} retoc={dashboard.retoc} managedLibrary={managedLibrary} movingLibrary={movingLibrary} onChange={setSettings} onSave={() => void saveSettings()} onPickGame={() => void locateGame()} onPickExecutable={async () => { const picked = await open({ multiple: false, title: "Select game executable or launcher" }); if (typeof picked === "string") setSettings({ ...settings, customExecutablePath: picked }); }} onPickRetoc={async () => { const picked = await open({ multiple: false, title: "Select retoc executable" }); if (typeof picked === "string") setSettings({ ...settings, retocPath: picked }); }} onMoveLibrary={() => void moveLibrary()} onUseDefaultLibrary={() => void moveLibrary(true)} onOpenLibrary={() => void openFolder("library")} onOpenLogs={() => void openFolder("logs")} onOpenData={() => void openFolder("data")} links={links} onOpenLink={openExternal} nexus={nexus} nexusAccount={nexusAccount} onSaveNexusKey={saveNexusKey} onClearNexusKey={clearNexusKey} onToggleNxmHandler={toggleNxmHandler} onSetAutoUpdateCheck={setAutoUpdateCheck} />}
+    {page === "diagnostics" && <DiagnosticsPage report={diagnostics} loading={loading} ue4ss={dashboard.ue4ss} onRun={() => void runDiagnostics()} onCopy={() => void navigator.clipboard.writeText(diagnostics?.text ?? "").then(() => notify("Diagnostic report copied."))} onOpenUe4ssLog={() => void openFolder("ue4ss-log")} onOpenLogs={() => void openFolder("logs")} />}
+    {page === "settings" && <SettingsPage settings={settings} retoc={dashboard.retoc} sevenZip={sevenZip} managedLibrary={managedLibrary} movingLibrary={movingLibrary} onChange={setSettings} onSave={() => void saveSettings()} onPickGame={() => void locateGame()} onPickExecutable={async () => { const picked = await open({ multiple: false, title: "Select game executable or launcher" }); if (typeof picked === "string") setSettings({ ...settings, customExecutablePath: picked }); }} onPickRetoc={async () => { const picked = await open({ multiple: false, title: "Select retoc executable" }); if (typeof picked === "string") setSettings({ ...settings, retocPath: picked }); }} onPickSevenZip={async () => { const picked = await open({ multiple: false, title: "Select the 7-Zip command-line executable (7z.exe)" }); if (typeof picked === "string") setSettings({ ...settings, sevenZipPath: picked }); }} onMoveLibrary={() => void moveLibrary()} onUseDefaultLibrary={() => void moveLibrary(true)} onOpenLibrary={() => void openFolder("library")} onOpenLogs={() => void openFolder("logs")} onOpenData={() => void openFolder("data")} links={links} onOpenLink={openExternal} nexus={nexus} nexusAccount={nexusAccount} onSaveNexusKey={saveNexusKey} onClearNexusKey={clearNexusKey} onToggleNxmHandler={toggleNxmHandler} onSetAutoUpdateCheck={setAutoUpdateCheck} />}
     {page === "about" && <AboutPage projectUrl={links.project} nexusUrl={links.nexusManager} onOpenLink={openExternal} update={update} checking={updateChecking} error={updateError} onCheckUpdates={() => void checkUpdates(true)} />}
     {discoveringExisting && <div className="scan-indicator" role="status"><span className="spin" />Scanning game folders for existing mods…</div>}
     {existingReview && existingScan && <AdoptionDialog scan={existingScan} busy={adoptingExisting} onClose={() => setExistingReview(false)} onAdopt={adoptExisting} />}
-    {toast && <div className={`toast ${toast.kind}`} role="status">{toast.text}</div>}
+    {toast && <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
+      <p>{toast.text}</p>
+      {toast.kind === "error" && <div className="toast-actions">
+        <button onClick={() => void navigator.clipboard.writeText(toast.text).catch(() => undefined)}>Copy</button>
+        <button onClick={() => void openFolder("logs")}>Open logs</button>
+        <button onClick={() => setToast(null)}>Dismiss</button>
+      </div>}
+    </div>}
   </Shell>;
 }

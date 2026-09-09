@@ -24,6 +24,11 @@ interface Props {
 
 export function HomePage({ data, onInstall, onDiagnose, onLocate, onOpenMods, onOpenGame, onLaunchGame, onGetUe4ss, onInstallUe4ss, busy, launching, canLaunch = data.game.detected, existingModsFound, onReviewExisting, onDismissExisting }: Props) {
   const { game, ue4ss } = data;
+  // "Healthy" used to mean only that the files were in place, which told a
+  // user whose game never loaded the runtime that nothing was wrong. The badge
+  // now waits for the log UE4SS writes when it actually runs, and for the
+  // absence of a second proxy DLL that would load instead of it.
+  const loaded = ue4ss.healthy && ue4ss.logFound && ue4ss.extraLoaders.length === 0;
   return <div className="page">
     <header className="hero">
       <div><p className="eyebrow">TACTICAL MOD CONTROL</p><h1>Star Wars: Zero Company</h1><p className="muted">A safe, purpose-built manager for packaged and UE4SS mods.</p></div>
@@ -42,7 +47,7 @@ export function HomePage({ data, onInstall, onDiagnose, onLocate, onOpenMods, on
       <section className="panel action-panel"><div className="panel-heading"><div><p className="eyebrow">QUICK ACTION</p><h2>Install a downloaded mod</h2></div><Download aria-hidden /></div><p>Drop a ZIP, 7z, packaged mod file, or UE4SS Lua folder. The payload is staged and checked before anything reaches the game.</p><button className="primary large" onClick={onInstall}><Download aria-hidden size={18} />Install mod</button><button onClick={onOpenMods}><FolderOpen aria-hidden size={18} />Open mods folder</button></section>
       <section className="panel runtime"><div className="panel-heading"><h2>Runtime readiness</h2><ShieldCheck aria-hidden /></div>
         <div className="check-row"><PackageCheck aria-hidden /><div><b>Packaged mods</b><small>{game.detected ? "Deployment path ready" : "Waiting for game path"}</small></div><StatusBadge status={game.detected ? "good" : "unknown"}>{game.detected ? "Ready" : "Unknown"}</StatusBadge></div>
-        <div className="check-row"><Puzzle aria-hidden /><div><b>UE4SS runtime</b><small>{ue4ss.message ?? (ue4ss.installed ? `${ue4ss.modCount} UE4SS mod${ue4ss.modCount === 1 ? "" : "s"} detected` : "Optional runtime not installed")}</small></div><StatusBadge status={ue4ss.healthy ? "good" : ue4ss.installed ? "warning" : "unknown"}>{ue4ss.installed ? ue4ss.healthy ? "Healthy" : "Attention" : "Not found"}</StatusBadge>
+        <div className="check-row"><Puzzle aria-hidden /><div><b>UE4SS runtime</b><small>{ue4ss.message ?? (ue4ss.installed ? `${ue4ss.modCount} UE4SS mod${ue4ss.modCount === 1 ? "" : "s"} detected` : "Optional runtime not installed")}</small></div><StatusBadge status={loaded ? "good" : ue4ss.installed ? "warning" : "unknown"}>{ue4ss.installed ? loaded ? "Active" : "Attention" : "Not found"}</StatusBadge>
           <div className="row-links"><button className="link-button" onClick={onGetUe4ss}><ExternalLink aria-hidden size={14} />Get the tested build on Nexus Mods</button><button className="link-button" onClick={onInstallUe4ss} disabled={!game.detected || busy}><FileArchive aria-hidden size={14} />{ue4ss.installed ? "Update from downloaded package\u2026" : "Install from downloaded package\u2026"}</button></div>
         </div>
         <div className="check-row"><Activity aria-hidden /><div><b>Container verification</b><small>{data.retoc.version ?? "Configure retoc in Settings"}</small></div><StatusBadge status={data.retoc.found ? "good" : "warning"}>{data.retoc.found ? "Available" : "Setup needed"}</StatusBadge></div>

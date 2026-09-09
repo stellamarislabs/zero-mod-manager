@@ -28,13 +28,15 @@ pub enum AppError {
     Ue4ssPackageNotRecognized,
     #[error("A different file already exists at {0}. It was not overwritten.")]
     DeploymentConflict(PathBuf),
-    #[error("A managed file changed outside ZCOM Mod Manager: {0}")]
+    /// The literal prefix is part of the contract with the interface, which
+    /// recognises this failure to offer the override that resolves it.
+    #[error("A managed file changed outside ZCOM Mod Manager: {0}. Some mods write their own settings or data files there while the game runs.")]
     ChecksumMismatch(PathBuf),
     #[error("The installation preview expired. Inspect the mod again.")]
     PreviewExpired,
     #[error("The proposed load order is invalid: {0}")]
     InvalidLoadOrder(String),
-    #[error("Archive support requires the 7z command-line tool on this system.")]
+    #[error("This archive needs the 7-Zip command-line tool, and none was found. Install 7-Zip, or point Settings → Archive tool at your own 7z.exe.")]
     SevenZipNotFound,
     #[error("That is not a usable Nexus Mods link: {0}")]
     NexusLinkInvalid(String),
@@ -72,3 +74,23 @@ impl Serialize for AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The interface recognises this failure by its opening words in order to
+    /// offer the override that resolves it, so the prefix is part of the
+    /// contract rather than incidental wording. `isChangedFileError` in
+    /// `src/services/backend.ts` matches the same text.
+    #[test]
+    fn the_changed_file_message_keeps_the_prefix_the_interface_matches() {
+        let message =
+            AppError::ChecksumMismatch(PathBuf::from("/game/mod/registry.txt")).to_string();
+        assert!(
+            message.starts_with("A managed file changed outside ZCOM Mod Manager:"),
+            "{message}"
+        );
+        assert!(message.contains("registry.txt"), "{message}");
+    }
+}

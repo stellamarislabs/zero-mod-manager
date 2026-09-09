@@ -478,12 +478,19 @@ pub fn replace(
     Ok(summary)
 }
 
+/// Deploys or withdraws a mod's payload.
+///
+/// `force` applies only to disabling, and overrides the guard on a deployed
+/// file that no longer matches what was recorded: a mod that writes its own
+/// settings or data changes one every time the game runs, and without the
+/// override such a mod could not be turned off at all.
 pub fn set_enabled(
     conn: &Connection,
     library: &Path,
     game: &Path,
     id: &str,
     enabled: bool,
+    force: bool,
 ) -> Result<()> {
     let record = database::mod_record(conn, id)?;
     if record.enabled == enabled {
@@ -535,10 +542,12 @@ pub fn set_enabled(
             ue4ss::update_mods_txt(game, key, true)?
         }
     } else {
-        for (_, destination, _, expected) in &records {
-            let path = PathBuf::from(destination);
-            if path.exists() && sha256(&path)? != *expected {
-                return Err(AppError::ChecksumMismatch(path));
+        if !force {
+            for (_, destination, _, expected) in &records {
+                let path = PathBuf::from(destination);
+                if path.exists() && sha256(&path)? != *expected {
+                    return Err(AppError::ChecksumMismatch(path));
+                }
             }
         }
         let mut removed = Vec::new();
@@ -675,9 +684,9 @@ mod tests {
         let m = install(&mut c, &l, &g, &staged(d.path()), None).unwrap();
         let deployed = g.join("SWZeroCompany/Content/Paks/~mods/Test_P.pak");
         assert!(deployed.exists());
-        set_enabled(&c, &l, &g, &m.id, false).unwrap();
+        set_enabled(&c, &l, &g, &m.id, false, false).unwrap();
         assert!(!deployed.exists());
-        set_enabled(&c, &l, &g, &m.id, true).unwrap();
+        set_enabled(&c, &l, &g, &m.id, true, false).unwrap();
         uninstall(&c, &l, &m.id, false, Some(&g)).unwrap();
         assert!(!deployed.exists());
     }
@@ -758,9 +767,9 @@ mod tests {
 
         // Disabling clears the tree as well, so a disabled mod does not look
         // installed to the runtime.
-        set_enabled(&c, &l, &g, &m.id, false).unwrap();
+        set_enabled(&c, &l, &g, &m.id, false, false).unwrap();
         assert!(!folder.exists(), "the mod folder outlived its payload");
-        set_enabled(&c, &l, &g, &m.id, true).unwrap();
+        set_enabled(&c, &l, &g, &m.id, true, false).unwrap();
         assert!(folder.join("Scripts/main.lua").exists());
 
         uninstall(&c, &l, &m.id, false, Some(&g)).unwrap();
@@ -804,6 +813,66 @@ mod tests {
         ));
         assert!(deployed.exists());
     }
+
+    /// A mod that writes its own settings or data into its deployed folder
+    /// changes a managed file every time the game runs, and the guard above
+    /// then refuses both an update and a removal. The override is the only way
+    /// out of that, so it has to remove the changed file too.
+    #[test]
+    fn a_forced_uninstall_removes_a_changed_file() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        let m = install(&mut c, &l, &g, &staged(d.path()), None).unwrap();
+        let deployed = g.join("SWZeroCompany/Content/Paks/~mods/Test_P.pak");
+        fs::write(&deployed, b"written by the mod itself").unwrap();
+
+        uninstall(&c, &l, &m.id, true, Some(&g)).unwrap();
+
+        assert!(!deployed.exists(), "the changed file goes with the mod");
+        assert!(
+            database::mod_record(&c, &m.id).is_err(),
+            "the entry is gone"
+        );
+    }
+
+    /// The same override on the upgrade path: a changed file must not be able
+    /// to strand a mod at the version that wrote it.
+    #[test]
+    fn a_forced_replace_upgrades_over_a_changed_file() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        let old = install(&mut c, &l, &g, &staged(d.path()), None).unwrap();
+        let deployed = g.join("SWZeroCompany/Content/Paks/~mods/Test_P.pak");
+        fs::write(&deployed, b"written by the mod itself").unwrap();
+
+        let next = d.path().join("next");
+        fs::create_dir_all(&next).unwrap();
+        let mut upgrade = staged(&next);
+        upgrade.version = Some("2".into());
+        fs::write(&upgrade.files[0].source, b"version two").unwrap();
+
+        assert!(
+            matches!(
+                replace(&mut c, &l, &g, &old.id, &upgrade, None, false),
+                Err(AppError::ChecksumMismatch(_))
+            ),
+            "the guard still stands without the override"
+        );
+        let new = replace(&mut c, &l, &g, &old.id, &upgrade, None, true).unwrap();
+
+        assert_eq!(fs::read(&deployed).unwrap(), b"version two");
+        assert!(database::mod_record(&c, &old.id).is_err());
+        assert!(database::mod_record(&c, &new.id).is_ok());
+    }
+
     #[test]
     fn filename_collision_is_refused() {
         let d = tempdir().unwrap();
@@ -866,14 +935,14 @@ mod tests {
         let installed = install(&mut c, &l, &g, &staged, None).unwrap();
         assert_eq!(fs::read(&original).unwrap(), b"silent");
 
-        set_enabled(&c, &l, &g, &installed.id, false).unwrap();
+        set_enabled(&c, &l, &g, &installed.id, false, false).unwrap();
         assert_eq!(
             fs::read(&original).unwrap(),
             b"shipped",
             "disabling puts back what the game shipped"
         );
 
-        set_enabled(&c, &l, &g, &installed.id, true).unwrap();
+        set_enabled(&c, &l, &g, &installed.id, true, false).unwrap();
         assert_eq!(fs::read(&original).unwrap(), b"silent");
 
         uninstall(&c, &l, &installed.id, false, Some(&g)).unwrap();
@@ -898,9 +967,9 @@ mod tests {
         let staged = gamedir(d.path(), "SWZeroCompany/Content/Movies/Logo.mp4", b"silent");
         let installed = install(&mut c, &l, &g, &staged, None).unwrap();
 
-        set_enabled(&c, &l, &g, &installed.id, false).unwrap();
+        set_enabled(&c, &l, &g, &installed.id, false, false).unwrap();
         fs::write(&original, b"patched").unwrap();
-        set_enabled(&c, &l, &g, &installed.id, true).unwrap();
+        set_enabled(&c, &l, &g, &installed.id, true, false).unwrap();
         uninstall(&c, &l, &installed.id, false, Some(&g)).unwrap();
         assert_eq!(
             fs::read(&original).unwrap(),
@@ -984,7 +1053,7 @@ mod tests {
             .join("SWZeroCompany/Binaries/Win64/ue4ss/Mods/ShadowsTweaks/Scripts/main.lua")
             .is_file());
 
-        set_enabled(&c, &l, &g, &installed.id, false).unwrap();
+        set_enabled(&c, &l, &g, &installed.id, false, false).unwrap();
         let text = fs::read_to_string(&mods_txt).unwrap();
         assert!(text.contains("ShadowsCore : 0"), "{text}");
         assert!(text.contains("ShadowsTweaks : 0"), "{text}");

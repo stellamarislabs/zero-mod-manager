@@ -72,17 +72,25 @@ pub fn run(
     ));
     items.push(item("Package conflicts",if conflicts==0{"good"}else{"warning"},format!("{conflicts} overlapping file/package group(s)"),(conflicts>0).then(||"Open Mods to review the affected managers. Raw package names remain hidden by default.".into())));
     items.push(item("retoc",if retoc.found{"good"}else{"warning"},retoc.version.clone().unwrap_or_else(||"Not configured".into()),(!retoc.found).then(||"Install retoc 0.1.5 or select its executable in Settings before installing IoStore mods.".into())));
+    // A complete layout is not a loaded runtime. Reporting "Healthy" from file
+    // presence alone told a user whose game never loaded UE4SS that nothing was
+    // wrong, so the verdict now waits for the log UE4SS writes when it runs.
     items.push(item(
         "UE4SS",
-        if ue4ss.healthy {
+        if ue4ss.healthy && ue4ss.log_found && ue4ss.extra_loaders.is_empty() {
             "good"
         } else if ue4ss.installed {
             "warning"
         } else {
             "unknown"
         },
-        if ue4ss.healthy {
-            format!("Healthy; {} UE4SS mod(s)", ue4ss.mod_count)
+        if ue4ss.healthy && ue4ss.log_found {
+            format!("Loaded at least once; {} UE4SS mod(s)", ue4ss.mod_count)
+        } else if ue4ss.healthy {
+            format!(
+                "Files complete, but no UE4SS log yet; {} UE4SS mod(s)",
+                ue4ss.mod_count
+            )
         } else if ue4ss.installed {
             "Incomplete installation".into()
         } else {
@@ -97,6 +105,54 @@ pub fn run(
             })
         }),
     ));
+    if ue4ss.installed {
+        items.push(item(
+            "UE4SS log",
+            if ue4ss.log_found { "good" } else { "warning" },
+            ue4ss
+                .log_path
+                .clone()
+                .unwrap_or_else(|| "Not written yet".into()),
+            (!ue4ss.log_found).then(|| {
+                "UE4SS writes this the first time it loads. Its absence after starting the game \
+                 means the loader never ran."
+                    .into()
+            }),
+        ));
+        if let Some(present) = ue4ss.vc_runtime {
+            // A warning rather than an error: this checks System32 only, and a
+            // runtime deployed some other way would otherwise report the whole
+            // installation as blocked when the game in fact works.
+            items.push(item(
+                "Visual C++ runtime",
+                if present { "good" } else { "warning" },
+                if present {
+                    "Present"
+                } else {
+                    "vcruntime140 not found in System32"
+                },
+                (!present).then(|| {
+                    "UE4SS links against the Visual C++ 2015-2022 x64 runtime. Without it Windows \
+                     cannot load the loader, and the game either hangs at start-up or runs with \
+                     no UE4SS. Install it from Microsoft."
+                        .into()
+                }),
+            ));
+        }
+        if !ue4ss.extra_loaders.is_empty() {
+            items.push(item(
+                "Proxy DLLs beside the game",
+                "warning",
+                ue4ss.extra_loaders.join(", "),
+                Some(
+                    "UE4SS loads only as dwmapi.dll. A copy renamed to another proxy name lets \
+                     the game start while the runtime never loads. Remove the extra file unless \
+                     another tool needs it."
+                        .into(),
+                ),
+            ));
+        }
+    }
     if game.compat_data_path.is_some() {
         items.push(item("Proton compatibility prefix", "good", "Found", None));
         items.push(item(

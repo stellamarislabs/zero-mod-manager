@@ -26,6 +26,9 @@ const dashboard: Dashboard = {
     healthy: true,
     modCount: 1,
     logFound: true,
+    logPath: "/game/SWZeroCompany/Binaries/Win64/ue4ss/UE4SS.log",
+    extraLoaders: [],
+    vcRuntime: null,
     protonOverride: true,
     message: null
   },

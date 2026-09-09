@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
+    sync::RwLock,
 };
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -135,13 +136,208 @@ fn extract_zip(source: &Path, destination: &Path, executables: &mut Vec<String>)
     Ok(())
 }
 
-fn find_7z() -> Option<PathBuf> {
-    let binary = if cfg!(windows) { "7z.exe" } else { "7z" };
-    std::env::var_os("PATH").and_then(|p| {
-        std::env::split_paths(&p)
-            .map(|d| d.join(binary))
-            .find(|p| p.is_file())
+/// A path the user pointed at their own 7-Zip build, held for the life of the
+/// process.
+///
+/// Extraction runs far below the command layer, in code that has no database
+/// handle, so the stored setting is published here at start-up and whenever it
+/// is saved rather than threaded through every caller.
+static CONFIGURED_7Z: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Records the 7-Zip executable the user chose. An empty or missing path
+/// clears the override and returns discovery to the automatic search.
+pub fn set_seven_zip_path(path: Option<&str>) {
+    let chosen = path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if let Ok(mut held) = CONFIGURED_7Z.write() {
+        *held = chosen;
+    }
+}
+
+/// The executable names a usable 7-Zip build ships under.
+///
+/// `7z` is the full build; `7za` and `7zr` are the standalone ones some users
+/// have instead, and both read the `.7z` archives this manager cares about.
+/// NanaZip installs the same command-line tool under its own name.
+const SEVEN_ZIP_NAMES: [&str; 4] = ["7z", "7za", "7zr", "NanaZipC"];
+
+fn seven_zip_binaries() -> impl Iterator<Item = String> {
+    SEVEN_ZIP_NAMES.into_iter().map(|name| {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.to_string()
+        }
     })
+}
+
+/// Builds a command that runs without opening a console window.
+///
+/// This is a windowless application, so every child process it starts would
+/// otherwise flash a console over the game or the manager. Extraction runs
+/// while the user is watching an install, and the archive-tool lookup runs on
+/// every refresh, so both go through here.
+pub(crate) fn quiet_command(program: &Path) -> Command {
+    // Only the Windows arm mutates it, and Windows is the only platform where
+    // the console window this suppresses exists.
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
+/// Directories a Windows 7-Zip installation lands in.
+///
+/// The 7-Zip installer does not put itself on `PATH`, so searching `PATH`
+/// alone reported the tool as missing on a machine that plainly had it. These
+/// are the standard per-machine and per-user locations, and cost nothing but a
+/// few `is_file` calls.
+#[cfg(windows)]
+fn windows_install_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for variable in [
+        "ProgramFiles",
+        "ProgramW6432",
+        "ProgramFiles(x86)",
+        "LOCALAPPDATA",
+        "APPDATA",
+    ] {
+        if let Some(value) = std::env::var_os(variable) {
+            let base = PathBuf::from(value);
+            roots.push(base.join("7-Zip"));
+            roots.push(base.join("NanaZip"));
+            roots.push(base.join("Programs").join("7-Zip"));
+            roots.push(base.join("Programs").join("NanaZip"));
+        }
+    }
+    roots
+}
+
+/// The directory the 7-Zip installer recorded, for an installation somewhere
+/// the standard locations do not cover.
+///
+/// This shells out, so it is consulted only after every cheaper candidate has
+/// missed rather than on each lookup.
+#[cfg(windows)]
+fn registered_install_dirs() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for key in [
+        r"HKLM\SOFTWARE\7-Zip",
+        r"HKLM\SOFTWARE\WOW6432Node\7-Zip",
+        r"HKCU\SOFTWARE\7-Zip",
+    ] {
+        let Ok(output) = quiet_command(Path::new("reg"))
+            .args(["query", key, "/v", "Path"])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            // REG_SZ values print as `    Path    REG_SZ    C:\Program Files\7-Zip\`.
+            if let Some((_, value)) = line.split_once("REG_SZ") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    roots.push(PathBuf::from(value));
+                }
+            }
+        }
+    }
+    roots
+}
+
+#[cfg(not(windows))]
+fn windows_install_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+fn registered_install_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Locates a usable 7-Zip command-line tool.
+///
+/// The user's own choice wins, then `PATH`, then the places an installer puts
+/// it. Each candidate is confirmed to be a file before it is returned, so a
+/// stale registry entry left by an uninstall does not shadow a working build,
+/// and neither does a configured path pointing at a tool since removed.
+fn resolve_7z(configured: Option<&Path>) -> Option<PathBuf> {
+    if let Some(configured) = configured.filter(|path| path.is_file()) {
+        return Some(configured.to_path_buf());
+    }
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>());
+    let first_in = |directories: Vec<PathBuf>| {
+        directories.into_iter().find_map(|directory| {
+            seven_zip_binaries()
+                .map(|binary| directory.join(binary))
+                .find(|candidate| candidate.is_file())
+        })
+    };
+    first_in(on_path.collect())
+        .or_else(|| first_in(windows_install_dirs()))
+        // Consulted last, because unlike the rest it starts a process.
+        .or_else(|| first_in(registered_install_dirs()))
+}
+
+pub(crate) fn find_7z() -> Option<PathBuf> {
+    let configured = CONFIGURED_7Z.read().ok().and_then(|held| held.clone());
+    resolve_7z(configured.as_deref())
+}
+
+/// Version banners already read, keyed by the executable they came from.
+///
+/// Settings asks for this on every refresh, and running the tool each time to
+/// re-read a string that cannot have changed is a process start the user pays
+/// for after every mod action.
+static SEVEN_ZIP_VERSIONS: RwLock<Option<(PathBuf, Option<String>)>> = RwLock::new(None);
+
+/// The banner a 7-Zip build prints when run with no arguments.
+fn seven_zip_version(path: &Path) -> Option<String> {
+    if let Some((known, version)) = SEVEN_ZIP_VERSIONS.read().ok().and_then(|held| held.clone()) {
+        if known == path {
+            return version;
+        }
+    }
+    let version = quiet_command(path)
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find(|line| line.contains("7-Zip") || line.contains("NanaZip"))
+                .map(|line| line.trim().to_string())
+        })
+        .filter(|version| !version.is_empty());
+    if let Ok(mut held) = SEVEN_ZIP_VERSIONS.write() {
+        *held = Some((path.to_path_buf(), version.clone()));
+    }
+    version
+}
+
+/// What the interface shows for the archive tool, so a missing 7-Zip can be
+/// pointed at from Settings rather than only reported when an install fails.
+pub fn seven_zip_info() -> crate::models::ToolInfo {
+    let path = find_7z();
+    let version = path.as_deref().and_then(seven_zip_version);
+    crate::models::ToolInfo {
+        found: path.is_some(),
+        path: path.map(|path| path.display().to_string()),
+        version,
+    }
 }
 
 /// Rebuilds directories from member names that kept `\` as their separator.
@@ -173,7 +369,7 @@ fn split_backslash_names(root: &Path) -> Result<()> {
 
 fn extract_7z(source: &Path, destination: &Path, executables: &mut Vec<String>) -> Result<()> {
     let seven = find_7z().ok_or(AppError::SevenZipNotFound)?;
-    let listing = Command::new(&seven)
+    let listing = quiet_command(&seven)
         .args(["l", "-slt", "--"])
         .arg(source)
         .output()?;
@@ -209,7 +405,7 @@ fn extract_7z(source: &Path, destination: &Path, executables: &mut Vec<String>) 
             note_executable(executables, &path);
         }
     }
-    let output = Command::new(seven)
+    let output = quiet_command(&seven)
         .args(["x", "-y", "-snl", "-snh"])
         .arg(format!("-o{}", destination.display()))
         .arg("--")
@@ -304,6 +500,33 @@ mod tests {
             writer.write_all(body).unwrap();
         }
         writer.finish().unwrap();
+    }
+
+    /// 7-Zip's Windows installer does not put itself on `PATH`, so a machine
+    /// that plainly had the tool was told archive support was unavailable. The
+    /// configured path is the user's way out of any gap the search still has.
+    #[test]
+    fn a_configured_seven_zip_path_wins_over_the_search() {
+        let d = tempdir().unwrap();
+        let chosen = d.path().join(if cfg!(windows) { "7z.exe" } else { "7z" });
+        fs::write(&chosen, b"").unwrap();
+        assert_eq!(resolve_7z(Some(&chosen)), Some(chosen));
+    }
+
+    /// A tool the user pointed at and later uninstalled must not shadow one
+    /// that is still there.
+    #[test]
+    fn a_configured_path_that_is_gone_falls_back_to_the_search() {
+        let d = tempdir().unwrap();
+        let missing = d.path().join("removed-7z");
+        assert_eq!(resolve_7z(Some(&missing)), resolve_7z(None));
+    }
+
+    /// `set_seven_zip_path` only accepts a path that exists, so a stale
+    /// setting never becomes the answer.
+    #[test]
+    fn an_empty_or_missing_configured_path_is_ignored() {
+        assert_eq!(resolve_7z(Some(Path::new(""))), resolve_7z(None));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, LaunchReport, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdateReport, NexusAccount, NexusStatus, Ue4ssInstallReport, UpdateInfo } from "../types";
+import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, LaunchReport, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, Ue4ssInstallReport, UpdateInfo } from "../types";
 
 export const backend = {
   dashboard: () => invoke<Dashboard>("get_dashboard"),
@@ -16,10 +16,10 @@ export const backend = {
   discoverExistingMods: () => invoke<ExistingModScan>("discover_existing_mods"),
   adoptExistingMods: (scanId: string, groups: AdoptionGroup[]) => invoke<AdoptionReport>("adopt_existing_mods", { scanId, groups }),
   acknowledgeExistingModPrompt: () => invoke<void>("acknowledge_existing_mod_prompt"),
-  install: (stagingId: string, name?: string, replace?: string) => invoke<ModSummary>("install_mod", { stagingId, name: name ?? null, replace: replace ?? null }),
+  install: (stagingId: string, name?: string, replace?: string, force = false) => invoke<ModSummary>("install_mod", { stagingId, name: name ?? null, replace: replace ?? null, force }),
   discardPreviews: (stagingIds: string[]) => invoke<void>("discard_previews", { stagingIds }),
   rename: (id: string, name: string) => invoke<void>("rename_mod", { id, name }),
-  setEnabled: (id: string, enabled: boolean) => invoke<void>("set_mod_enabled", { id, enabled }),
+  setEnabled: (id: string, enabled: boolean, force = false) => invoke<void>("set_mod_enabled", { id, enabled, force }),
   setHidden: (id: string, hidden: boolean) => invoke<void>("set_mod_hidden", { id, hidden }),
   uninstall: (id: string, force = false) => invoke<void>("uninstall_mod", { id, force }),
   verify: (id: string) => invoke<string>("verify_mod", { id }),
@@ -39,12 +39,13 @@ export const backend = {
   takePendingNxm: () => invoke<string | null>("take_pending_nxm"),
   diagnostics: () => invoke<DiagnosticReport>("run_diagnostics"),
   settings: () => invoke<AppSettings>("get_settings"),
+  sevenZipStatus: () => invoke<ToolInfo>("seven_zip_status"),
   saveSettings: (settings: AppSettings) => invoke<void>("save_settings", { settings }),
   setGamePath: (path: string) => invoke<GameInfo>("set_game_path", { path }),
   managedLibrary: () => invoke<ManagedLibraryInfo>("get_managed_library"),
   moveManagedLibrary: (path: string) => invoke<ManagedLibraryInfo>("move_managed_library", { path }),
   copyDiagnostics: () => invoke<string>("diagnostic_report"),
-  openManagedPath: (kind: "game" | "mods" | "logs" | "data" | "library" | `mod:${string}` | `installed:${string}`) => invoke<void>("open_managed_path", { kind }),
+  openManagedPath: (kind: "game" | "mods" | "logs" | "data" | "library" | "ue4ss-log" | `mod:${string}` | `installed:${string}`) => invoke<void>("open_managed_path", { kind }),
   launchGame: () => invoke<LaunchReport>("launch_game"),
   reportInterfaceError: (message: string, stack: string | null, context: string) => invoke<void>("report_interface_error", { message, stack, context }),
   reportInterfaceLayout: (context: string) => invoke<void>("report_interface_layout", { context })
@@ -58,6 +59,18 @@ interface GameInfo {
   engine: string;
   compatDataPath: string | null;
   source: "automatic" | "manual" | "none";
+}
+
+/**
+ * Whether a failure is the guard on a managed file that changed on disk.
+ *
+ * A mod that writes its own settings or data files into its deployed folder
+ * trips this every time, and without recognising it the interface could only
+ * report the refusal, leaving the mod impossible to update or remove. The
+ * message prefix is the contract; `AppError::ChecksumMismatch` owns the text.
+ */
+export function isChangedFileError(error: unknown): boolean {
+  return friendlyError(error).startsWith("A managed file changed outside ZCOM Mod Manager:");
 }
 
 export function friendlyError(error: unknown): string {

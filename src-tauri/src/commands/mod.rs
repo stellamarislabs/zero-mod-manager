@@ -5,7 +5,7 @@ use crate::{
     models::{
         AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan,
         GameInfo, Inspection, LaunchReport, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo,
-        ModPreview, ModSummary, ModUpdate, ModUpdateReport, ReplacedMod, StagedMod,
+        ModPreview, ModSummary, ModUpdate, ModUpdateReport, ReplacedMod, StagedMod, ToolInfo,
     },
     mods, retoc, steam, ue4ss, AppContext,
 };
@@ -851,11 +851,17 @@ pub fn rename_mod(id: String, name: String, ctx: State<'_, AppContext>) -> Resul
 /// `replace` carries the id the preview reported in `replaces`. Passing it
 /// upgrades in place; leaving it out installs alongside, which fails with the
 /// usual deployment conflict when the two really do collide.
+///
+/// `force` overrides the checksum guard on the mod being replaced. A mod that
+/// writes its own settings or data files into its deployed folder changes them
+/// while the game runs, and without an override the user could neither update
+/// nor remove it.
 #[tauri::command]
 pub fn install_mod(
     staging_id: String,
     name: Option<String>,
     replace: Option<String>,
+    force: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<ModSummary> {
     let mut staged = previews(&ctx)?
@@ -898,7 +904,7 @@ pub fn install_mod(
             old_id,
             &staged,
             game_info.steam_build_id,
-            false,
+            force,
         ),
         None => deployment::install(
             &mut conn,
@@ -968,11 +974,16 @@ pub fn install_mod(
 }
 
 #[tauri::command]
-pub fn set_mod_enabled(id: String, enabled: bool, ctx: State<'_, AppContext>) -> Result<()> {
+pub fn set_mod_enabled(
+    id: String,
+    enabled: bool,
+    force: bool,
+    ctx: State<'_, AppContext>,
+) -> Result<()> {
     let (_, game_path) = require_game(&ctx)?;
     let conn = connection(&ctx)?;
     let library = mods_dir(&ctx)?;
-    deployment::set_enabled(&conn, &library, &game_path, &id, enabled)?;
+    deployment::set_enabled(&conn, &library, &game_path, &id, enabled, force)?;
     log(
         &ctx,
         "info",
@@ -1159,13 +1170,31 @@ pub fn save_settings(mut settings: AppSettings, ctx: State<'_, AppContext>) -> R
         settings.retoc_path = None
     }
     if settings
+        .seven_zip_path
+        .as_deref()
+        .is_some_and(|path| path.trim().is_empty())
+    {
+        settings.seven_zip_path = None
+    }
+    if settings
         .custom_executable_path
         .as_deref()
         .is_some_and(|path| path.trim().is_empty())
     {
         settings.custom_executable_path = None
     }
-    database::save_settings(&connection(&ctx)?, &settings)
+    database::save_settings(&connection(&ctx)?, &settings)?;
+    // Extraction reads this from a process-wide slot, so the new choice has to
+    // reach it here rather than at the next start-up.
+    archives::set_seven_zip_path(settings.seven_zip_path.as_deref());
+    Ok(())
+}
+
+/// Reports the archive tool the manager would use, so Settings can show
+/// whether 7-Zip was found before an install runs into it.
+#[tauri::command]
+pub fn seven_zip_status() -> ToolInfo {
+    archives::seven_zip_info()
 }
 #[tauri::command]
 pub fn set_game_path(path: String, ctx: State<'_, AppContext>) -> Result<GameInfo> {
@@ -1348,6 +1377,24 @@ pub async fn move_managed_library(path: String, app: AppHandle) -> Result<Manage
 
 fn managed_path_for(kind: &str, ctx: &AppContext) -> Result<PathBuf> {
     let library = mods_dir(ctx)?;
+    // The UE4SS log is a file rather than a folder, and it exists only once the
+    // runtime has actually loaded, so it returns before the directory is
+    // created: creating an empty one would answer the question wrongly.
+    if kind == "ue4ss-log" {
+        let game = game(ctx)?
+            .path
+            .map(PathBuf::from)
+            .ok_or(AppError::GameNotFound)?;
+        return ue4ss::detect(Some(&game), None)
+            .log_path
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                AppError::Other(
+                    "UE4SS has not written a log. It writes one the first time it loads, so                      start the game once."
+                        .into(),
+                )
+            });
+    }
     let path = if let Some(id) = kind.strip_prefix("mod:") {
         let conn = connection(ctx)?;
         database::mod_record(&conn, id)?;
@@ -1485,6 +1532,12 @@ pub fn log(ctx: &AppContext, level: &str, event: &str, detail: &str) {
     }
 }
 
+/// Records a failure the interface showed the user.
+///
+/// This covers both a JavaScript crash and an ordinary operation that failed:
+/// the message a user sees is otherwise the only account of what went wrong,
+/// and a user who cannot reproduce it on demand had nothing to quote. The
+/// event name keeps the two apart, because a failed install is not a crash.
 #[tauri::command]
 pub fn report_interface_error(
     message: String,
@@ -1499,7 +1552,12 @@ pub fn report_interface_error(
         truncate(stack.as_deref().unwrap_or(""), 12_000),
         truncate(&context, 2_000)
     );
-    log(&ctx, "error", "interface_error", &detail);
+    let event = if context == "notification" {
+        "operation_failed"
+    } else {
+        "interface_error"
+    };
+    log(&ctx, "error", event, &detail);
 }
 
 /// Records the dimensions from a WebView layout mismatch without treating it

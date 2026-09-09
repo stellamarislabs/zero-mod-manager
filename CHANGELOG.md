@@ -2,6 +2,42 @@
 
 All notable changes are documented here.
 
+## 0.6.5
+
+### Fixed
+
+- A mod that writes its own settings or data next to its deployed files can now
+  be updated, disabled, and removed. Such a mod changes a managed file every
+  time the game runs, and the guard that protects a file the user edited by
+  hand refused all three actions on that evidence alone, leaving an entry in the
+  library that nothing worked on. The refusal now names the file, explains that
+  a mod may have written it, and offers to go ahead: the changed file is
+  replaced by the new version on an update and removed with the payload on a
+  disable or an uninstall. Declining still keeps the file and changes nothing.
+- 7-Zip is found where it is actually installed. Its Windows installer does not
+  add itself to `PATH`, and only `PATH` was searched, so a machine that plainly
+  had 7-Zip was told that "archive support requires the 7z command-line tool".
+  The standard 7-Zip and NanaZip folders and the directory 7-Zip's installer
+  registered are now searched too, `7za` and `7zr` are accepted, and
+  **Settings → Archive tool** takes a path to any other build. The failure
+  message says where to set it.
+- A failure now stays on screen until it is dismissed, with buttons to copy it
+  and to open the logs. Error messages disappeared after four and a half
+  seconds, which was not long enough to read an install failure, let alone
+  quote it. Every failure the interface reports is also appended to
+  `application.jsonl`, so one that has already been closed can still be found.
+- UE4SS is no longer called healthy on the strength of its files alone. That
+  verdict was reached from file presence, so a user whose game never loaded the
+  runtime was told nothing was wrong. Diagnostics now reports whether UE4SS has
+  written its log — the only evidence in the game folder that it ever loaded —
+  and offers to open it. It also names a second proxy DLL beside the game
+  executable, since UE4SS loads only as `dwmapi.dll` and a copy renamed to
+  `version.dll` or similar lets the game start while the runtime never loads,
+  and it checks for the Visual C++ 2015-2022 x64 runtime UE4SS links against,
+  whose absence hangs the game at start-up or leaves UE4SS silently unloaded.
+- Child processes no longer flash a console window over the game or the
+  manager on Windows.
+
 ## 0.6.2
 
 ### Added

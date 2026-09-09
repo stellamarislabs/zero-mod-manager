@@ -12,9 +12,16 @@ export interface GameInfo {
 
 export interface Ue4ssInfo {
   installed: boolean;
+  /** Every file the runtime needs is present. Not a claim that it ever loaded. */
   healthy: boolean;
   modCount: number;
+  /** UE4SS wrote its log, which is the only proof it actually loaded. */
   logFound: boolean;
+  logPath: string | null;
+  /** Proxy DLLs beside the game executable other than UE4SS's own dwmapi.dll. */
+  extraLoaders: string[];
+  /** Whether the Visual C++ runtime is present; null off Windows. */
+  vcRuntime: boolean | null;
   protonOverride: boolean | null;
   message: string | null;
 }
@@ -367,6 +374,8 @@ export interface AppSettings {
   gamePath: string | null;
   customExecutablePath: string | null;
   retocPath: string | null;
+  /** A 7-Zip executable the user pointed at, when the automatic search misses it. */
+  sevenZipPath: string | null;
   logLevel: "normal" | "verbose" | "developer";
   advancedPackageNames: boolean;
   reducedMotion: boolean;

@@ -39,10 +39,24 @@ pub struct ToolInfo {
 #[serde(rename_all = "camelCase")]
 pub struct Ue4ssInfo {
     pub installed: bool,
+    /// Whether every file the runtime needs is in place. This is a statement
+    /// about the layout on disk and nothing more: it does not mean the runtime
+    /// has ever loaded, which only `log_found` can attest.
     pub healthy: bool,
     /// UE4SS mod folders present in the runtime, script and DLL mods alike.
     pub mod_count: usize,
+    /// Whether UE4SS has written its own log, which is the only evidence in
+    /// the game folder that it actually loaded at least once.
     pub log_found: bool,
+    /// Where that log is, so the interface can offer to open it.
+    pub log_path: Option<String>,
+    /// Proxy DLLs sitting next to the game executable other than the
+    /// `dwmapi.dll` UE4SS ships. A renamed copy is the usual cause of a
+    /// runtime that is present but never loads.
+    pub extra_loaders: Vec<String>,
+    /// Whether the Visual C++ runtime UE4SS links against is present. `None`
+    /// off Windows, where the question does not apply.
+    pub vc_runtime: Option<bool>,
     pub proton_override: Option<bool>,
     pub message: Option<String>,
 }
@@ -377,6 +391,9 @@ pub struct AppSettings {
     pub game_path: Option<String>,
     pub custom_executable_path: Option<String>,
     pub retoc_path: Option<String>,
+    /// A 7-Zip executable the user pointed at, for the machines where 7-Zip is
+    /// installed somewhere the automatic search does not reach.
+    pub seven_zip_path: Option<String>,
     pub log_level: String,
     pub advanced_package_names: bool,
     pub reduced_motion: bool,
@@ -401,6 +418,7 @@ impl Default for AppSettings {
             game_path: None,
             custom_executable_path: None,
             retoc_path: None,
+            seven_zip_path: None,
             log_level: "normal".into(),
             advanced_package_names: false,
             reduced_motion: false,

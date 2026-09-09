@@ -1,7 +1,11 @@
-# Known Limitations — 0.6.2
+# Known Limitations — 0.6.5
 
-- 7z installation uses the open-source 7-Zip command-line program available on
-  the host. ZIP support is built in. A missing `7z` produces setup guidance.
+- 7z and RAR installation uses the open-source 7-Zip command-line program
+  available on the host. ZIP support is built in. The tool is looked for on
+  `PATH`, in the standard 7-Zip and NanaZip install folders, and in the
+  directory 7-Zip's installer registered; Settings takes a path for anything
+  else. A missing tool produces setup guidance.
+- RAR still needs a 7-Zip build carrying the RAR codec, which many omit.
 - UE4SS can be installed from a package the user downloaded, but it is never
   downloaded automatically. The Nexus `nxm://` handoff can download a package
   after the user starts it on the website and configures a personal API key.

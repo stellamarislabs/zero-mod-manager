@@ -36,6 +36,51 @@ fn is_user_owned(relative: &Path) -> bool {
 pub fn base(game: &Path) -> PathBuf {
     game.join("SWZeroCompany/Binaries/Win64")
 }
+/// Proxy names a loader is commonly renamed to when `dwmapi.dll` misbehaves.
+///
+/// UE4SS ships a loader built to forward the `dwmapi` exports. Renaming that
+/// same file to another proxy name produces a DLL the game loads happily and
+/// that forwards nothing, which is exactly the "the game starts but UE4SS
+/// never appears" report. Naming the file found is more use than guessing.
+const PROXY_NAMES: [&str; 6] = [
+    "version.dll",
+    "d3d11.dll",
+    "d3d12.dll",
+    "dinput8.dll",
+    "xinput1_3.dll",
+    "winmm.dll",
+];
+
+/// Where UE4SS writes its log. 3.x puts it beside `UE4SS.dll`; older layouts
+/// left it next to the game executable.
+fn log_path(win64: &Path) -> Option<PathBuf> {
+    [
+        win64.join("ue4ss/UE4SS.log"),
+        win64.join("UE4SS.log"),
+        win64.join("ue4ss/UE4SS-log.txt"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+/// Whether the Visual C++ 2015-2022 runtime UE4SS links against is installed.
+///
+/// Without it Windows fails to load the proxy DLL, and the symptom is a game
+/// that either hangs during start-up or runs with no sign of UE4SS at all —
+/// with no error either way, because the failure happens inside the loader.
+fn vc_runtime_present() -> Option<bool> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let system = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+    let system32 = system.join("System32");
+    Some(
+        ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
+            .iter()
+            .all(|name| system32.join(name).is_file()),
+    )
+}
+
 pub fn detect(game: Option<&Path>, compat_data: Option<&Path>) -> Ue4ssInfo {
     let Some(game) = game else {
         return Ue4ssInfo::default();
@@ -52,11 +97,38 @@ pub fn detect(game: Option<&Path>, compat_data: Option<&Path>) -> Ue4ssInfo {
     } else {
         0
     };
+    let extra_loaders: Vec<String> = PROXY_NAMES
+        .iter()
+        .filter(|name| win64.join(name).is_file())
+        .map(|name| (*name).to_string())
+        .collect();
+    let log = log_path(&win64);
+    let vc_runtime = vc_runtime_present();
     let proton_override = compat_data.map(|_| detect_proton_override(game));
     let message = if installed && !healthy {
         Some("The UE4SS layout is incomplete (dwmapi.dll, UE4SS.dll, or Mods is missing).".into())
+    } else if installed && vc_runtime == Some(false) {
+        Some(
+            "The Visual C++ 2015-2022 x64 runtime is missing, so Windows cannot load the UE4SS \
+             loader. Install it from Microsoft, then start the game again."
+                .into(),
+        )
     } else if installed && proton_override == Some(false) {
         Some("UE4SS may not load under Proton. Add WINEDLLOVERRIDES=\"dwmapi=n,b\" %command% to Steam launch options.".into())
+    } else if healthy && !extra_loaders.is_empty() {
+        Some(format!(
+            "Another proxy DLL sits beside the game executable: {}. UE4SS loads only as \
+             dwmapi.dll, and a renamed copy starts the game without ever loading the runtime. \
+             Remove the extra file unless another tool needs it.",
+            extra_loaders.join(", ")
+        ))
+    } else if healthy && log.is_none() {
+        Some(
+            "The layout is complete, but UE4SS has never written a log, so it has not loaded \
+             yet. Start the game once; if no log appears, the loader is being blocked before it \
+             runs."
+                .into(),
+        )
     } else {
         None
     };
@@ -64,7 +136,10 @@ pub fn detect(game: Option<&Path>, compat_data: Option<&Path>) -> Ue4ssInfo {
         installed,
         healthy,
         mod_count,
-        log_found: root.join("UE4SS.log").is_file(),
+        log_found: log.is_some(),
+        log_path: log.map(|path| path.display().to_string()),
+        extra_loaders,
+        vc_runtime,
         proton_override,
         message,
     }
@@ -447,6 +522,60 @@ mod tests {
             "{preserved:?}"
         );
         assert_eq!(preserved.len(), 4, "{preserved:?}");
+    }
+
+    /// A complete layout is not a loaded runtime. Reporting health from file
+    /// presence alone told a user whose game never loaded UE4SS that nothing
+    /// was wrong, which sent them looking everywhere except at the loader.
+    #[test]
+    fn a_complete_layout_without_a_log_says_so() {
+        let d = tempdir().unwrap();
+        let win64 = base(d.path());
+        write(&win64.join("dwmapi.dll"), "loader");
+        write(&win64.join("ue4ss/UE4SS.dll"), "core");
+        fs::create_dir_all(win64.join("ue4ss/Mods")).unwrap();
+
+        let info = detect(Some(d.path()), None);
+
+        assert!(info.healthy, "every file the runtime needs is present");
+        assert!(!info.log_found, "but it has never written a log");
+        assert!(info.log_path.is_none());
+        assert!(
+            info.message.as_deref().is_some_and(|m| m.contains("log")),
+            "{:?}",
+            info.message
+        );
+
+        write(&win64.join("ue4ss/UE4SS.log"), "[00:00] UE4SS started");
+        let loaded = detect(Some(d.path()), None);
+        assert!(loaded.log_found);
+        assert!(loaded.log_path.is_some());
+        assert_eq!(loaded.message, None);
+    }
+
+    /// UE4SS loads only under the name it was built for. A copy renamed to
+    /// another proxy lets the game start while the runtime never loads, which
+    /// is indistinguishable from a healthy install by file presence alone.
+    #[test]
+    fn a_renamed_loader_beside_the_game_is_reported() {
+        let d = tempdir().unwrap();
+        let win64 = base(d.path());
+        write(&win64.join("dwmapi.dll"), "loader");
+        write(&win64.join("version.dll"), "the same loader, renamed");
+        write(&win64.join("ue4ss/UE4SS.dll"), "core");
+        write(&win64.join("ue4ss/UE4SS.log"), "started");
+        fs::create_dir_all(win64.join("ue4ss/Mods")).unwrap();
+
+        let info = detect(Some(d.path()), None);
+
+        assert_eq!(info.extra_loaders, vec!["version.dll".to_string()]);
+        assert!(
+            info.message
+                .as_deref()
+                .is_some_and(|m| m.contains("version.dll")),
+            "{:?}",
+            info.message
+        );
     }
 
     #[test]

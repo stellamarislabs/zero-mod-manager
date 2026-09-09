@@ -1085,12 +1085,12 @@ mod tests {
         assert_eq!(fs::read(&order).unwrap(), before);
         assert!(lua.is_file());
 
-        deployment::set_enabled(&conn, &library, &game, &adopted.id, true).unwrap();
+        deployment::set_enabled(&conn, &library, &game, &adopted.id, true, false).unwrap();
         assert!(lua.is_file());
         assert!(fs::read_to_string(&order).unwrap().contains("Quiet : 1"));
-        deployment::set_enabled(&conn, &library, &game, &adopted.id, false).unwrap();
+        deployment::set_enabled(&conn, &library, &game, &adopted.id, false, false).unwrap();
         assert!(!lua.exists());
-        deployment::set_enabled(&conn, &library, &game, &adopted.id, true).unwrap();
+        deployment::set_enabled(&conn, &library, &game, &adopted.id, true, false).unwrap();
         deployment::uninstall(&conn, &library, &adopted.id, false, Some(&game)).unwrap();
         assert!(!lua.exists());
         assert_eq!(database::counts(&conn).unwrap().0, 0);

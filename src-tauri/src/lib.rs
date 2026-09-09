@@ -91,6 +91,9 @@ pub fn run() {
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
             let settings = database::settings(&conn)
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+            // Archive extraction has no database handle of its own, so the
+            // user's chosen 7-Zip is published to it once, here.
+            archives::set_seven_zip_path(settings.seven_zip_path.as_deref());
             let configured_library = database::get_setting(&conn, "managed_library_path")
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?
                 .filter(|path| !path.trim().is_empty())
@@ -181,6 +184,7 @@ pub fn run() {
             commands::diagnostic_report,
             commands::get_settings,
             commands::save_settings,
+            commands::seven_zip_status,
             commands::set_game_path,
             commands::get_managed_library,
             commands::move_managed_library,

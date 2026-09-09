@@ -799,10 +799,10 @@ mod tests {
         let mods_path = game_root.join("SWZeroCompany/Content/Paks/~mods");
         assert!(mods_path.join("Alpha_0002_P.pak").exists());
         assert!(mods_path.join("Bravo_0001_P.pak").exists());
-        deployment::set_enabled(&conn, &library, &game_root, &a.id, false).unwrap();
+        deployment::set_enabled(&conn, &library, &game_root, &a.id, false, false).unwrap();
         assert!(!mods_path.join("Alpha_0002_P.pak").exists());
         assert_eq!(state(&conn).unwrap().potential_conflicts.len(), 1);
-        deployment::set_enabled(&conn, &library, &game_root, &a.id, true).unwrap();
+        deployment::set_enabled(&conn, &library, &game_root, &a.id, true, false).unwrap();
         deployment::verify(&conn, &a.id).unwrap();
         assert!(mods_path.join("Alpha_0002_P.pak").exists());
         deployment::uninstall(&conn, &library, &a.id, false, Some(&game_root)).unwrap();
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(active.potential_conflicts.len(), 0);
         assert_eq!(active.active_conflicts[0].winner_id, Some(c.id.clone()));
 
-        deployment::set_enabled(&conn, &library, &game_root, &c.id, false).unwrap();
+        deployment::set_enabled(&conn, &library, &game_root, &c.id, false, false).unwrap();
         let mixed = state(&conn).unwrap();
         assert_eq!(mixed.active_conflicts.len(), 1);
         assert_eq!(mixed.potential_conflicts.len(), 1);
@@ -862,7 +862,7 @@ mod tests {
         );
         assert_eq!(mixed.active_conflicts[0].winner_id, Some(b.id.clone()));
 
-        deployment::set_enabled(&conn, &library, &game_root, &b.id, false).unwrap();
+        deployment::set_enabled(&conn, &library, &game_root, &b.id, false, false).unwrap();
         let potential = state(&conn).unwrap();
         assert_eq!(potential.potential_conflicts.len(), 1);
         assert_eq!(
@@ -874,7 +874,7 @@ mod tests {
             .iter()
             .all(|entry| entry.potential_conflict_count == 2));
 
-        deployment::set_enabled(&conn, &library, &game_root, &a.id, false).unwrap();
+        deployment::set_enabled(&conn, &library, &game_root, &a.id, false, false).unwrap();
         assert_eq!(state(&conn).unwrap().potential_conflicts[0].winner_id, None);
     }
 
