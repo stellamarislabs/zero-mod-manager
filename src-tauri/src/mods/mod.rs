@@ -71,6 +71,29 @@ fn suffix_from(path: &Path, index: usize) -> PathBuf {
     path.components().skip(index).collect()
 }
 
+/// A configuration payload is anchored only when it spells the complete game
+/// settings path. Treating every loose INI as a config mod would let an
+/// archive overwrite unrelated user files.
+fn config_destination(path: &Path) -> Option<PathBuf> {
+    let parts: Vec<_> = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    for index in 0..parts.len().saturating_sub(3) {
+        if parts[index].eq_ignore_ascii_case("Saved")
+            && parts[index + 1].eq_ignore_ascii_case("Config")
+            && parts[index + 2].eq_ignore_ascii_case("Windows")
+        {
+            let destination: PathBuf = parts[index + 3..].iter().collect();
+            return (!destination.as_os_str().is_empty()).then_some(destination);
+        }
+    }
+    None
+}
+
 /// The readable part of a source name. Only a known archive extension is
 /// stripped, because a mod folder is regularly named with dots in it and
 /// `file_stem` would cut the name at the first one.
@@ -177,6 +200,45 @@ fn sanitize_folder(name: &str) -> String {
     } else {
         trimmed
     }
+}
+
+fn ue4ss_option_label(root: &Path, folder: &Path) -> Option<String> {
+    let label = |value: &str| {
+        display_name(value)
+            .split_whitespace()
+            .map(|word| {
+                if word.eq_ignore_ascii_case("zcunlocked") {
+                    "ZCUnlocked".into()
+                } else {
+                    let mut chars = word.chars();
+                    chars.next().map_or_else(String::new, |first| {
+                        first.to_uppercase().collect::<String>() + chars.as_str()
+                    })
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" ")
+    };
+    let relative = folder.strip_prefix(root).ok()?;
+    let parts: Vec<String> = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    if let Some(index) = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("payload"))
+    {
+        return parts.get(index + 1).map(|part| label(part));
+    }
+    parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("ue4ss"))
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| parts.get(index))
+        .map(|part| label(part))
 }
 
 /// Plugin mods: the folders the game mounts from `SWZeroCompany/Mods`.
@@ -409,22 +471,28 @@ fn collect(
     // when several arrive in one download: they are enabled, ordered, and
     // removed independently, so they cannot share a library entry.
     let folders = ue4ss_folders(root, &files);
-    let mut folder_keys: Vec<String> = Vec::new();
+    let mut key_counts: BTreeMap<String, usize> = BTreeMap::new();
     for folder in &folders {
         let key = if folder == root {
             sanitize_folder(source_name.as_deref().unwrap_or(&file_name(source)))
         } else {
             sanitize_folder(&file_name(folder))
         };
-        if folder_keys
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(&key))
-        {
-            return Err(AppError::Other(format!(
-                "This archive contains two UE4SS mod folders named {key}. Extract it and \
-                 install one at a time."
-            )));
-        }
+        *key_counts.entry(key.to_ascii_lowercase()).or_default() += 1;
+    }
+    for folder in &folders {
+        let key = if folder == root {
+            sanitize_folder(source_name.as_deref().unwrap_or(&file_name(source)))
+        } else {
+            sanitize_folder(&file_name(folder))
+        };
+        let duplicate = key_counts
+            .get(&key.to_ascii_lowercase())
+            .is_some_and(|count| *count > 1);
+        let option_label = duplicate
+            .then(|| ue4ss_option_label(root, folder))
+            .flatten()
+            .unwrap_or_else(|| "Alternative variant".into());
         let mut payload = Vec::new();
         for file in files.iter().filter(|file| file.starts_with(folder)) {
             let inside = rel(folder, file)?;
@@ -436,17 +504,23 @@ fn collect(
             });
             claimed.insert(file.clone());
         }
-        folder_keys.push(key.clone());
         buckets.push(Bucket {
             kind: "ue4ss",
             files: payload,
             keys: vec![key],
-            intrinsic_name: (folder != root).then(|| display_name(&file_name(folder))),
+            intrinsic_name: (folder != root).then(|| {
+                let base = display_name(&file_name(folder));
+                if duplicate {
+                    format!("{base} — {option_label}")
+                } else {
+                    base
+                }
+            }),
             packages: Vec::new(),
             package_paths: Vec::new(),
             verification: "not-required".into(),
             verification_details: None,
-            option_label: None,
+            option_label: duplicate.then_some(option_label),
         });
     }
 
@@ -684,6 +758,44 @@ fn collect(
         }
     }
 
+    // User configuration. This deliberately replaces whole files rather than
+    // trying to merge INI keys whose duplicate-key and ordering semantics are
+    // game-specific. Deployment keeps the displaced file and restores it on
+    // disable or uninstall.
+    let mut config = Vec::new();
+    let config_candidates: Vec<PathBuf> = files
+        .iter()
+        .filter(|file| !claimed.contains(*file))
+        .cloned()
+        .collect();
+    for file in &config_candidates {
+        let relative = rel(root, file)?;
+        if let Some(destination) = config_destination(&relative) {
+            config.push(PayloadFile {
+                source: file.clone(),
+                library_relative: relative,
+                destination_relative: destination,
+            });
+            claimed.insert(file.clone());
+        }
+    }
+    if !config.is_empty() {
+        buckets.push(Bucket {
+            kind: "config",
+            files: config,
+            keys: Vec::new(),
+            intrinsic_name: None,
+            packages: Vec::new(),
+            package_paths: Vec::new(),
+            verification: "not-required".into(),
+            verification_details: Some(
+                "Whole configuration files are backed up and restored; settings are not merged."
+                    .into(),
+            ),
+            option_label: None,
+        });
+    }
+
     // Everything the game reads straight from its own folders: ReShade and
     // other loader shims, replacement movies and audio, and blueprint mods.
     let injector_root = files
@@ -818,14 +930,8 @@ fn collect(
                 format!("{executable} is an executable outside the mod layout and is ignored.")
             });
         }
-        let (verification, details) = if bucket.kind == "iostore" || bucket.kind == "pak" {
-            (
-                bucket.verification.clone(),
-                bucket.verification_details.clone(),
-            )
-        } else {
-            ("not-required".to_string(), None)
-        };
+        let verification = bucket.verification.clone();
+        let details = bucket.verification_details.clone();
         let orderable = bucket.kind == "iostore"
             && bucket.files.iter().any(|file| {
                 file.destination_relative
@@ -925,6 +1031,10 @@ fn collect(
                 "gamedir" => {
                     Some("Game-folder mods are placed at fixed paths and are not ordered.".into())
                 }
+                "config" => Some(
+                    "Configuration mods replace whole files at fixed user-data paths and are not ordered."
+                        .into(),
+                ),
                 _ => None,
             },
             option_label: bucket.option_label.clone(),
@@ -1233,6 +1343,32 @@ mod tests {
     }
 
     #[test]
+    fn same_named_ue4ss_variants_are_separate_install_options() {
+        let s = tempdir().unwrap();
+        let c = tempdir().unwrap();
+        for variant in ["standalone", "zcunlocked-compat"] {
+            write(
+                &s.path().join(format!(
+                    "payload/{variant}/ue4ss/Mods/ExpandedWardrobe/dlls/main.dll"
+                )),
+                variant.as_bytes(),
+            );
+        }
+
+        let found = scan(s.path(), c.path(), &tool(), None, true, false).unwrap();
+
+        assert_eq!(found.len(), 2);
+        let labels: BTreeSet<_> = found
+            .iter()
+            .filter_map(|(_, preview)| preview.option_label.as_deref())
+            .collect();
+        assert_eq!(labels, BTreeSet::from(["Standalone", "ZCUnlocked Compat"]));
+        assert!(found
+            .iter()
+            .all(|(staged, _)| staged.deployment_keys == ["ExpandedWardrobe"]));
+    }
+
+    #[test]
     fn separates_a_packaged_mod_from_a_lua_mod_in_one_archive() {
         let s = tempdir().unwrap();
         let c = tempdir().unwrap();
@@ -1348,6 +1484,41 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_only_a_complete_zero_company_config_path() {
+        let s = tempdir().unwrap();
+        let c = tempdir().unwrap();
+        write(
+            &s.path()
+                .join("AppData/Local/SWZeroCompany/Saved/Config/Windows/GameUserSettings.ini"),
+            b"[/Script/Engine.GameUserSettings]",
+        );
+
+        let (staged, preview) = one(s.path(), c.path(), false);
+
+        assert_eq!(preview.mod_type, "config");
+        assert_eq!(
+            staged.files[0].destination_relative,
+            PathBuf::from("GameUserSettings.ini")
+        );
+        assert!(preview
+            .verification_details
+            .as_deref()
+            .unwrap()
+            .contains("backed up and restored"));
+    }
+
+    #[test]
+    fn a_loose_ini_is_not_assumed_to_be_a_game_config() {
+        let s = tempdir().unwrap();
+        let c = tempdir().unwrap();
+        write(&s.path().join("GameUserSettings.ini"), b"unsafe guess");
+        assert!(matches!(
+            scan(s.path(), c.path(), &tool(), None, false, false),
+            Err(AppError::ModNotRecognized)
+        ));
+    }
+
+    #[test]
     fn places_a_loader_shim_next_to_the_executable() {
         let s = tempdir().unwrap();
         let c = tempdir().unwrap();
@@ -1416,23 +1587,28 @@ mod tests {
     }
 
     /// Reads real published archives, which no CI runner may download. Point
-    /// `ZCOM_MOD_ARCHIVES` at a folder of downloads and run
+    /// `ZERO_MOD_MANAGER_ARCHIVES` at a folder of downloads and run
     /// `cargo test -- --ignored --nocapture` to see what each one resolves to.
     #[test]
     #[ignore = "requires locally downloaded mod archives"]
     fn describes_locally_downloaded_archives() {
-        let Some(folder) = std::env::var_os("ZCOM_MOD_ARCHIVES") else {
-            panic!("set ZCOM_MOD_ARCHIVES to a folder of downloaded mod archives")
+        let Some(folder) = std::env::var_os("ZERO_MOD_MANAGER_ARCHIVES") else {
+            panic!("set ZERO_MOD_MANAGER_ARCHIVES to a folder of downloaded mod archives")
         };
+        let integration_tool = std::env::var("ZERO_MOD_MANAGER_RETOC")
+            .ok()
+            .map(|path| crate::retoc::find(Some(&path)))
+            .unwrap_or_else(tool);
         let cache = tempdir().unwrap();
         let mut seen = 0;
+        let mut failures = Vec::new();
         for entry in fs::read_dir(folder).unwrap().filter_map(|e| e.ok()) {
             let path = entry.path();
             if !path.is_file() {
                 continue;
             }
             seen += 1;
-            match scan(&path, cache.path(), &tool(), None, true, false) {
+            match scan(&path, cache.path(), &integration_tool, None, true, false) {
                 Ok(found) => {
                     println!("{}", file_name(&path));
                     for (staged, preview) in found {
@@ -1447,12 +1623,49 @@ mod tests {
                         for file in preview.files.iter().take(4) {
                             println!("      {file}");
                         }
+                        if !preview.valid {
+                            failures.push(format!(
+                                "{}: {} ({})",
+                                file_name(&path),
+                                preview.name,
+                                preview
+                                    .verification_details
+                                    .unwrap_or_else(|| "validation failed".into())
+                            ));
+                        }
                     }
                 }
-                Err(error) => println!("{}\n  REJECTED: {error}", file_name(&path)),
+                Err(error) => {
+                    println!("{}\n  REJECTED: {error}", file_name(&path));
+                    failures.push(format!("{}: {error}", file_name(&path)));
+                }
+            }
+        }
+        for path in std::env::var_os("ZERO_MOD_MANAGER_LOOSE_MODS")
+            .into_iter()
+            .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        {
+            seen += 1;
+            match scan(&path, cache.path(), &integration_tool, None, true, false) {
+                Ok(found) => {
+                    println!("{} (folder)", file_name(&path));
+                    for (_, preview) in found {
+                        println!(
+                            "  [{}] {} files={}",
+                            preview.mod_type,
+                            preview.name,
+                            preview.files.len()
+                        );
+                        if !preview.valid {
+                            failures.push(format!("{}: validation failed", file_name(&path)));
+                        }
+                    }
+                }
+                Err(error) => failures.push(format!("{}: {error}", file_name(&path))),
             }
         }
         assert!(seen > 0, "the folder held no archives");
+        assert!(failures.is_empty(), "compatibility failures: {failures:#?}");
     }
 
     #[test]

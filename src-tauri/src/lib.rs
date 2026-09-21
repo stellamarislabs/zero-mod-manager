@@ -8,6 +8,7 @@ mod diagnostics;
 mod error;
 mod fomod;
 mod load_order;
+mod migration;
 mod models;
 mod mods;
 mod nexus;
@@ -24,6 +25,23 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 use tauri_plugin_deep_link::DeepLinkExt;
+
+fn bootstrap_log(logs_dir: &Path, event: &str, detail: &str) {
+    use std::io::Write;
+    let record = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "level": "info",
+        "event": event,
+        "detail": detail
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(logs_dir.join("application.jsonl"))
+    {
+        let _ = writeln!(file, "{record}");
+    }
+}
 
 pub struct AppContext {
     data_dir: PathBuf,
@@ -79,6 +97,7 @@ pub fn run() {
             for dir in [&data_dir, &cache_dir, &logs_dir] {
                 std::fs::create_dir_all(dir)?
             }
+            bootstrap_log(&logs_dir, "startup_begin", env!("CARGO_PKG_VERSION"));
             // Extractions from a previous run are only useful to previews that
             // no longer exist, so the sandbox starts empty.
             let _ = std::fs::remove_dir_all(cache_dir.join("staging"));
@@ -129,6 +148,7 @@ pub fn run() {
             if let Some(current) = current {
                 let _ = database::set_setting(&conn, "last_game_build", &current);
             }
+            bootstrap_log(&logs_dir, "startup_ready", "application state initialized");
             app.manage(AppContext {
                 data_dir,
                 cache_dir,
@@ -191,10 +211,12 @@ pub fn run() {
             commands::open_managed_path,
             commands::launch_game,
             commands::report_interface_error,
-            commands::report_interface_layout
+            commands::report_interface_layout,
+            commands::legacy_import_status,
+            commands::import_legacy_data
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ZCOM Mod Manager");
+        .expect("error while running Zero Mod Manager");
 }
 
 fn directory_has_entries(path: &Path) -> bool {

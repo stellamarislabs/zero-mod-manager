@@ -20,11 +20,32 @@ use tauri_plugin_opener::OpenerExt;
 fn connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
     database::open(&ctx.db_path)
 }
+
+/// Reads a saved manual path without letting a moved Steam library make every
+/// startup command fail. The old path stays visible so the interface can show
+/// exactly which saved location needs replacing.
+fn manual_game_or_unavailable(path: &Path) -> Result<GameInfo> {
+    match steam::from_manual(path) {
+        Ok(info) => Ok(info),
+        Err(AppError::InvalidGamePath(_)) => Ok(GameInfo {
+            path: Some(path.display().to_string()),
+            source: "manual".into(),
+            problem_code: Some("game_path_invalid".into()),
+            problem: Some(
+                "The saved game location is no longer valid. The Steam library may have moved."
+                    .into(),
+            ),
+            ..GameInfo::default()
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 fn game(ctx: &AppContext) -> Result<GameInfo> {
     let conn = connection(ctx)?;
     let settings = database::settings(&conn)?;
     if let Some(path) = settings.game_path.filter(|p| !p.is_empty()) {
-        steam::from_manual(Path::new(&path))
+        manual_game_or_unavailable(Path::new(&path))
     } else {
         Ok(steam::discover()?.unwrap_or_default())
     }
@@ -1060,8 +1081,12 @@ pub fn get_links() -> Links {
         // The manager's own Nexus page. A release reaches Nexus and GitHub
         // alike, and someone who found the manager on Nexus expects to update
         // it there.
-        nexus_manager: "https://www.nexusmods.com/starwarszerocompany/mods/29".into(),
-        project: "https://github.com/arctco/zcom-mod-manager".into(),
+        nexus_manager: option_env!("ZERO_MOD_MANAGER_NEXUS_URL")
+            .unwrap_or("")
+            .into(),
+        project: option_env!("ZERO_MOD_MANAGER_PROJECT_URL")
+            .unwrap_or("")
+            .into(),
     }
 }
 
@@ -1111,15 +1136,18 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 /// at startup and also exposes an explicit retry on the About page.
 #[tauri::command]
 pub async fn check_for_updates() -> Result<UpdateInfo> {
-    const RELEASE_API: &str =
-        "https://api.github.com/repos/arctco/zcom-mod-manager/releases/latest";
+    let release_api = option_env!("ZERO_MOD_MANAGER_RELEASE_API").ok_or_else(|| {
+        AppError::Other(
+            "Update checking is disabled until the continuation repository is published.".into(),
+        )
+    })?;
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let response = reqwest::Client::builder()
-        .user_agent(format!("zcom-mod-manager/{current_version}"))
+        .user_agent(format!("zero-mod-manager/{current_version}"))
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| AppError::Network(error.to_string()))?
-        .get(RELEASE_API)
+        .get(release_api)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -1156,6 +1184,34 @@ pub fn run_diagnostics(ctx: State<'_, AppContext>) -> Result<DiagnosticReport> {
 #[tauri::command]
 pub fn diagnostic_report(ctx: State<'_, AppContext>) -> Result<String> {
     Ok(run_diagnostics(ctx)?.text)
+}
+
+#[tauri::command]
+pub fn legacy_import_status(
+    ctx: State<'_, AppContext>,
+) -> Result<crate::migration::LegacyImportStatus> {
+    crate::migration::status(&ctx)
+}
+
+#[tauri::command]
+pub fn import_legacy_data(
+    include_nexus_key: bool,
+    ctx: State<'_, AppContext>,
+) -> Result<crate::migration::LegacyImportReport> {
+    let report = crate::migration::import(&ctx, include_nexus_key)?;
+    log(
+        &ctx,
+        "info",
+        "legacy_data_imported",
+        &format!(
+            "mods={} files={} bytes={} nexus_key={}",
+            report.imported_mods,
+            report.copied_files,
+            report.copied_bytes,
+            report.nexus_key_imported
+        ),
+    );
+    Ok(report)
 }
 #[tauri::command]
 pub fn get_settings(ctx: State<'_, AppContext>) -> Result<AppSettings> {
@@ -1441,6 +1497,10 @@ fn managed_path_for(kind: &str, ctx: &AppContext) -> Result<PathBuf> {
 #[tauri::command]
 pub fn open_managed_path(kind: String, app: AppHandle, ctx: State<'_, AppContext>) -> Result<()> {
     let path = managed_path_for(&kind, &ctx)?;
+    #[cfg(target_os = "linux")]
+    if steam::running_from_appimage() {
+        return steam::open_path_from_appimage(&path);
+    }
     app.opener()
         .open_path(path.display().to_string(), None::<String>)
         .map_err(|error| AppError::Other(format!("The folder could not be opened: {error}")))?;
@@ -1743,7 +1803,7 @@ pub fn set_nxm_handler(
             app.config()
                 .product_name
                 .as_deref()
-                .unwrap_or("ZCOM Mod Manager"),
+                .unwrap_or("Zero Mod Manager"),
             &ctx.data_dir,
         )?;
         #[cfg(not(target_os = "linux"))]
@@ -2232,8 +2292,8 @@ pub async fn check_mod_updates(force: bool, app: AppHandle) -> Result<ModUpdateR
 #[cfg(test)]
 mod update_tests {
     use super::{
-        checked_recently, configured_executable, copy_library_for_move, replaced_by, update_report,
-        version_is_newer,
+        checked_recently, configured_executable, copy_library_for_move, manual_game_or_unavailable,
+        replaced_by, update_report, version_is_newer,
     };
     use crate::{
         database,
@@ -2248,6 +2308,25 @@ mod update_tests {
         assert!(version_is_newer("0.1.10", "0.1.9"));
         assert!(!version_is_newer("v0.1.4", "0.1.4"));
         assert!(!version_is_newer("0.1.3", "0.1.4"));
+    }
+
+    #[test]
+    fn a_moved_manual_game_path_is_recoverable_startup_state() {
+        let directory = tempdir().unwrap();
+        let moved = directory
+            .path()
+            .join("old-steam-library/Star Wars Zero Company");
+
+        let info = manual_game_or_unavailable(&moved).unwrap();
+
+        assert!(!info.detected);
+        assert_eq!(info.path.as_deref(), Some(moved.to_string_lossy().as_ref()));
+        assert_eq!(info.source, "manual");
+        assert_eq!(info.problem_code.as_deref(), Some("game_path_invalid"));
+        assert!(info
+            .problem
+            .as_deref()
+            .is_some_and(|message| message.contains("moved")));
     }
 
     #[test]

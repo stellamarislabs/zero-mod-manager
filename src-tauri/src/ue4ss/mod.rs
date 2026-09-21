@@ -171,20 +171,37 @@ fn installed_mod_folders(mods: &Path) -> usize {
 }
 
 fn detect_proton_override(game: &Path) -> bool {
-    let steamapps = game
+    let mut roots = game
         .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "steamapps"));
-    let Some(steam_root) = steamapps.and_then(Path::parent) else {
-        return false;
-    };
-    let userdata = steam_root.join("userdata");
-    WalkDir::new(userdata)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_name() == "localconfig.vdf")
-        .filter_map(|e| fs::read_to_string(e.path()).ok())
-        .any(|text| text.contains("2075800") && text.to_ascii_lowercase().contains("dwmapi=n,b"))
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("steamapps"))
+        })
+        .and_then(Path::parent)
+        .map(|root| vec![root.join("userdata")])
+        .unwrap_or_default();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".local/share/Steam/userdata"));
+        roots.push(home.join(".steam/steam/userdata"));
+    }
+    roots.sort();
+    roots.dedup();
+    detect_proton_override_in(&roots)
+}
+
+fn detect_proton_override_in(userdata_roots: &[PathBuf]) -> bool {
+    userdata_roots.iter().any(|userdata| {
+        WalkDir::new(userdata)
+            .max_depth(4)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().eq_ignore_ascii_case("localconfig.vdf"))
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .any(|text| {
+                let lower = text.to_ascii_lowercase();
+                lower.contains("2075800") && lower.contains("dwmapi=n,b")
+            })
+    })
 }
 
 /// Case-insensitive lookup of a direct child, because archive casing varies
@@ -401,6 +418,16 @@ mod tests {
     }
 
     #[test]
+    fn finds_a_proton_override_in_the_primary_steam_userdata() {
+        let d = tempdir().unwrap();
+        write(
+            &d.path().join("123/config/localconfig.vdf"),
+            r#""2075800" { "LaunchOptions" "WINEDLLOVERRIDES=\"dwmapi=n,b\" %command%" }"#,
+        );
+        assert!(detect_proton_override_in(&[d.path().to_path_buf()]));
+    }
+
+    #[test]
     fn installs_a_package_and_keeps_existing_lua_mods() {
         let d = tempdir().unwrap();
         let package = d.path().join("pkg/UE4SS-SWZC/Binaries/Win64");
@@ -449,15 +476,17 @@ mod tests {
     }
 
     /// End-to-end check against a real published UE4SS package, which no CI
-    /// runner may download. Point `ZCOM_UE4SS_ARCHIVE` at a package from
+    /// runner may download. Point `ZERO_MOD_MANAGER_UE4SS_ARCHIVE` at a package from
     /// <https://www.nexusmods.com/starwarszerocompany/mods/9> and run
     /// `cargo test -- --ignored` to exercise a fresh install followed by an
     /// upgrade over user content.
     #[test]
     #[ignore = "requires a locally downloaded UE4SS package"]
     fn installs_a_published_package_over_user_content() {
-        let Some(archive) = std::env::var_os("ZCOM_UE4SS_ARCHIVE") else {
-            panic!("set ZCOM_UE4SS_ARCHIVE to a downloaded UE4SS package")
+        let Some(archive) = std::env::var_os("ZERO_MOD_MANAGER_UE4SS_ARCHIVE")
+            .or_else(|| std::env::var_os("ZCOM_UE4SS_ARCHIVE"))
+        else {
+            panic!("set ZERO_MOD_MANAGER_UE4SS_ARCHIVE to a downloaded UE4SS package")
         };
         let archive = PathBuf::from(archive);
         let d = tempdir().unwrap();

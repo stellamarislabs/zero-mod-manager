@@ -93,6 +93,25 @@ describe("home desktop actions", () => {
     expect((screen.getByRole("button", { name: "Launch game" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("explains a stale saved location without hiding the old path", () => {
+    render(<HomePage
+      data={{ ...dashboard, game: { ...dashboard.game, detected: false, path: "D:/OldSteam/Zero Company", problemCode: "game_path_invalid", problem: "The saved game location is no longer valid. The Steam library may have moved." } }}
+      onInstall={vi.fn()}
+      onDiagnose={vi.fn()}
+      onLocate={vi.fn()}
+      onOpenMods={vi.fn()}
+      onOpenGame={vi.fn()}
+      onLaunchGame={vi.fn()}
+      onGetUe4ss={vi.fn()}
+      onInstallUe4ss={vi.fn()}
+      busy={false}
+      launching={false}
+    />);
+    expect(screen.getByRole("heading", { name: "Your saved game location moved" })).toBeTruthy();
+    expect(screen.getByRole("alert").querySelector("code")?.textContent).toBe("D:/OldSteam/Zero Company");
+    expect(screen.getByRole("button", { name: "Locate game" })).toBeTruthy();
+  });
+
   it("allows a configured custom launcher when Steam detection is unavailable", async () => {
     const onLaunchGame = vi.fn();
     render(<HomePage

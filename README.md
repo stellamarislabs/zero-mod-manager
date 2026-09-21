@@ -1,17 +1,18 @@
 <div align="center">
-  <img src="images/icon.png" alt="" width="160" height="160">
-  <h1>ZCOM Mod Manager</h1>
+  <img src="src/assets/icon.svg" alt="" width="160" height="160">
+  <h1>Zero Mod Manager</h1>
 </div>
 
 A dedicated open-source mod manager for **Star Wars: Zero Company**.
 
-ZCOM Mod Manager understands Zero Company mod payloads instead of
+Zero Mod Manager understands Zero Company mod payloads instead of
 treating them as arbitrary files. It discovers Steam installations, validates
 IoStore containers with retoc, manages UE4SS script and DLL mods, installs
 game-folder mods such as ReShade, detects package overlap,
 records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
 
-> This is an independent community project. It is not affiliated with or
+> Zero Mod Manager is an independent continuation based on ZCOM Mod Manager
+> 0.6.5. It is not an official arctco release. This project is not affiliated with or
 > endorsed by Electronic Arts, Lucasfilm, Disney, Bit Reactor, or Nexus Mods.
 > Star Wars and related names are trademarks of their respective owners.
 
@@ -28,6 +29,12 @@ records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
 - Separate, labeled choices for packaged variants bundled in sibling folders
 - IoStore pair/triplet validation and retoc 0.1.5 verification
 - PAK-only and UE4SS Lua/DLL mod support
+- Unreal plugin mods with their `.uplugin`, `AssetRegistry.bin`, and complete
+  packaged content preserved under `SWZeroCompany/Mods`
+- Whole-file configuration mods for `Saved/Config/Windows`, with backup,
+  restore, checksum guards, and a running-game safety check
+- Opt-in import from ZCOM Mod Manager 0.6.5 with verified library copying,
+  database backup, and separately approved Nexus credential migration
 - Existing-mod discovery and non-destructive adoption for packaged, UE4SS, and
   additive `LogicMods` installations
 - Relocatable manager-owned source library plus checksum-guarded deployment records
@@ -42,8 +49,8 @@ records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
   the manager tracked provenance and an opt-in throttled check at start-up
 - Linux compatdata and Proton DLL-override diagnostics
 - Sanitized structured logs and a copyable Mod Doctor report
-- Automatic release notices with a manual retry on the About page, offering the
-  GitHub release and the manager's own Nexus Mods page alike
+- Release checking that remains disabled until the continuation repository and
+  Nexus page are explicitly configured at build time
 - No account or always-on network requirement, telemetry, analytics, or advertisements
 
 ## Screenshots
@@ -53,7 +60,7 @@ areas: Home, Mods, Install, Diagnostics, Settings, and About. Release
 screenshots are kept in `docs/screenshots/` when captured from a tagged build.
 
 The interface contains no extracted game assets. The application icon is the
-project's own Z mark, drawn as plain SVG in `src-tauri/icons/app-icon.svg`.
+project's own zero-ring mark, drawn as plain SVG in `src/assets/icon.svg`.
 
 ## Supported Platforms
 
@@ -529,8 +536,8 @@ Requirements:
 - `7z` for 7z archive installation/tests
 
 ```bash
-git clone https://github.com/arctco/zcom-mod-manager.git
-cd zcom-mod-manager/zcom-mod-manager
+git clone <continuation-repository-url>
+cd ZeroModManager
 npm ci
 npm run prepare:retoc
 npm run tauri build
@@ -554,7 +561,7 @@ CI cannot download. To exercise the UE4SS installer end to end, download a
 package from the mod page above and run:
 
 ```bash
-ZCOM_UE4SS_ARCHIVE=/path/to/ue4ss-package.zip \
+ZERO_MOD_MANAGER_UE4SS_ARCHIVE=/path/to/ue4ss-package.zip \
   cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
 ```
 
@@ -593,8 +600,8 @@ tag that does not match those files.
 
 ```bash
 npm run check:release-version -- v0.4.1
-git tag -s v0.4.1 -m "ZCOM Mod Manager 0.4.1"
-git push origin v0.4.1
+git tag -s v0.7.0 -m "Zero Mod Manager 0.7.0"
+git push origin v0.7.0
 ```
 
 Confirm checksums after the run finishes. See
@@ -630,12 +637,14 @@ No code was copied from Vortex or another mod manager.
 
 ## License
 
-ZCOM Mod Manager is licensed under the
+Zero Mod Manager is licensed under the
 [GNU General Public License version 3 only (`GPL-3.0-only`)](LICENSE).
-Copyright © 2026 Victor Hugo (arctco).
+Continuation copyright © 2026 Zero Mod Manager contributors. Original work
+copyright © 2026 Victor Hugo (arctco).
 
 The license permits forks and redistribution, but it does not grant permission
-to present a modified build as an official ZCOM Mod Manager release. See the
+to present a modified build as an official ZCOM Mod Manager release. Zero Mod
+Manager therefore uses a separate name, identifier, and logo. See the upstream
 [trademark and branding policy](TRADEMARKS.md) for use of the project name and
 logo.
 

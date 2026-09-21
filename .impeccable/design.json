@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-21T00:00:00+03:00",
+  "title": "Design System: Zero Mod Manager",
+  "extensions": {
+    "colorMeta": {
+      "void": { "role": "neutral", "displayName": "Void", "canonical": "#090d12" },
+      "surface": { "role": "neutral", "displayName": "Operations Surface", "canonical": "#10161e" },
+      "surface-raised": { "role": "neutral", "displayName": "Raised Console", "canonical": "#151d27" },
+      "command-gold": { "role": "primary", "displayName": "Command Gold", "canonical": "#e4b85c" },
+      "success": { "role": "semantic", "displayName": "Verified Green", "canonical": "#60d394" },
+      "warning": { "role": "semantic", "displayName": "Caution Amber", "canonical": "#f0b95b" },
+      "error": { "role": "semantic", "displayName": "Failure Red", "canonical": "#f17373" }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Headline", "purpose": "Page and recovery-state titles." },
+      "body": { "displayName": "Body", "purpose": "Instructions and operational explanations." },
+      "label": { "displayName": "Label", "purpose": "Controls, statuses, and compact metadata." }
+    },
+    "shadows": [
+      { "name": "transient-overlay", "value": "0 14px 38px #0009", "purpose": "Toasts and temporary feedback." },
+      { "name": "blocking-dialog", "value": "0 28px 80px #000c", "purpose": "Blocking dialogs." }
+    ],
+    "motion": [
+      { "name": "state-fast", "value": "150ms ease-out", "purpose": "Hover and control-state feedback." },
+      { "name": "state-standard", "value": "200ms ease-out", "purpose": "Progressive disclosure and recovery transitions." }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "900px" },
+      { "name": "single-column", "value": "1050px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The single strongest action in the current workflow.",
+      "html": "<button class=\"ds-btn-primary\">Install mod</button>",
+      "css": ".ds-btn-primary{min-height:38px;padding:0 14px;border:1px solid #e4b85c;border-radius:7px;background:#e4b85c;color:#17120a;font:700 14px Inter,system-ui,sans-serif;transition:background 150ms ease-out}.ds-btn-primary:hover{background:#f2c86d}.ds-btn-primary:focus-visible{outline:2px solid #8bc5ff;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Routine secondary action.",
+      "html": "<button class=\"ds-btn-secondary\">Open logs</button>",
+      "css": ".ds-btn-secondary{min-height:38px;padding:0 14px;border:1px solid #263342;border-radius:7px;background:#1a2430;color:#e8edf3;font:500 14px Inter,system-ui,sans-serif;transition:background 150ms ease-out,border-color 150ms ease-out}.ds-btn-secondary:hover{background:#202c39;border-color:#39495b}.ds-btn-secondary:focus-visible{outline:2px solid #8bc5ff;outline-offset:2px}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Paths, names, search, and settings values.",
+      "html": "<input class=\"ds-input\" value=\"Automatic detection\" aria-label=\"Game directory\">",
+      "css": ".ds-input{min-height:40px;padding:0 11px;border:1px solid #263342;border-radius:7px;background:#0a1016;color:#e8edf3;font:400 14px Inter,system-ui,sans-serif}.ds-input:hover{border-color:#39495b}.ds-input:focus-visible{outline:2px solid #8bc5ff;outline-offset:2px}"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "description": "A compact type or health label that always carries text.",
+      "html": "<span class=\"ds-chip\">IoStore</span>",
+      "css": ".ds-chip{display:inline-flex;align-items:center;padding:5px 9px;border:1px solid #2d3a49;border-radius:20px;background:#1c2631;color:#b8c2ce;font:500 12px Inter,system-ui,sans-serif}"
+    },
+    {
+      "name": "Operations Panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "A bounded workflow or diagnostic grouping.",
+      "html": "<section class=\"ds-panel\"><h2>Runtime readiness</h2><p>Verified components appear here.</p></section>",
+      "css": ".ds-panel{padding:24px;border:1px solid #263342;border-radius:9px;background:linear-gradient(145deg,#151d27,#10161e);color:#e8edf3;font-family:Inter,system-ui,sans-serif}.ds-panel h2{margin:0 0 10px;font-size:19px}.ds-panel p{margin:0;color:#8f9baa;line-height:1.5}"
+    },
+    {
+      "name": "Primary Navigation",
+      "kind": "nav",
+      "description": "Visible label navigation with an explicit active state.",
+      "html": "<nav class=\"ds-nav\"><button>Home</button><button class=\"active\" aria-current=\"page\">Mods</button></nav>",
+      "css": ".ds-nav{display:grid;gap:5px;width:196px;background:#0b1016;padding:8px}.ds-nav button{min-height:43px;padding:0 12px;border:1px solid transparent;border-radius:7px;background:transparent;color:#aeb8c4;text-align:left;font:500 14px Inter,system-ui,sans-serif}.ds-nav button:hover{background:#10161e;color:#e8edf3}.ds-nav button:focus-visible{outline:2px solid #8bc5ff;outline-offset:2px}.ds-nav button.active{border-color:#313c49;background:#1b222b;color:#e8edf3;box-shadow:inset 3px 0 #e4b85c}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Calm Operations Console",
+    "overview": "A compact desktop work surface for users who need to understand and reverse filesystem changes. Deep blue-black tonal layers separate work areas while restrained command gold marks primary intent.",
+    "keyCharacteristics": ["Restrained tonal hierarchy", "Actionable recovery", "Semantic health states", "Familiar desktop controls", "Reversible operations"],
+    "rules": [
+      { "name": "The Command Accent Rule", "body": "Gold marks an action or the selected context, never decoration.", "section": "colors" },
+      { "name": "The Flat Until Necessary Rule", "body": "Shadows communicate transient stacking only.", "section": "elevation" }
+    ],
+    "dos": ["Preserve the 0.6.5 information architecture.", "Pair state color with text and an icon.", "Keep recovery actions next to the failure."],
+    "donts": ["Do not hide failures behind an indefinite loader.", "Do not use neon, glassmorphism, gradient text, or decorative motion.", "Do not imply upstream endorsement without permission."]
+  }
+}

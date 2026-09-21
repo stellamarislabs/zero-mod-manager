@@ -21,7 +21,7 @@ describe("isChangedFileError", () => {
    */
   it("recognises the guard on a managed file that changed on disk", () => {
     const message =
-      "A managed file changed outside ZCOM Mod Manager: " +
+      "A managed file changed outside Zero Mod Manager: " +
       "D:\\Games\\SWZeroCompany\\Binaries\\Win64\\ue4ss\\Mods\\ConfigManager\\registry.txt. " +
       "Some mods write their own settings or data files there while the game runs.";
     expect(isChangedFileError(message)).toBe(true);

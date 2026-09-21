@@ -11,8 +11,8 @@ const nav: Array<[Page, string, typeof Home]> = [
 export function Shell({ page, onPage, gameReady, updateAvailable, children }: { page: Page; onPage: (page: Page) => void; gameReady: boolean; updateAvailable: boolean; children: React.ReactNode }) {
   return <div className="shell">
     <aside className="sidebar">
-      <button className="brand" onClick={() => onPage("home")} aria-label="ZCOM Mod Manager home">
-        <img className="brand-mark" src={brandMark} alt="" width={38} height={38} /><span><b>ZCOM</b><small>MOD MANAGER</small></span>
+      <button className="brand" onClick={() => onPage("home")} aria-label="Zero Mod Manager home">
+        <img className="brand-mark" src={brandMark} alt="" width={38} height={38} /><span><b>ZERO</b><small>MOD MANAGER</small></span>
       </button>
       <nav aria-label="Primary navigation">
         {nav.map(([id, label, Icon]) => <button key={id} className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} onClick={() => onPage(id)}><Icon aria-hidden size={19} />{label}{id === "about" && updateAvailable && <CircleArrowUp className="nav-update" aria-label="Update available" size={16} />}</button>)}

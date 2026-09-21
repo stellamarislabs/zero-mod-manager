@@ -93,7 +93,7 @@ export function AdoptionDialog({ scan, busy, onClose, onAdopt }: Props) {
   return <div className="dialog-backdrop" role="presentation">
     <section className="adoption-dialog panel" role="dialog" aria-modal="true" aria-labelledby="adoption-title">
       <header className="adoption-heading">
-        <div><p className="eyebrow">MIGRATION</p><h1 id="adoption-title">Adopt existing mods</h1><p className="muted">ZCOM copies each selected payload into its library. Nothing in the game folder is moved or renamed.</p></div>
+        <div><p className="eyebrow">MIGRATION</p><h1 id="adoption-title">Adopt existing mods</h1><p className="muted">Zero Mod Manager copies each selected payload into its library. Nothing in the game folder is moved or renamed.</p></div>
         <button className="detail-close" aria-label="Close existing mod review" onClick={onClose} disabled={busy}><X size={18} /></button>
       </header>
 
@@ -126,7 +126,7 @@ export function AdoptionDialog({ scan, busy, onClose, onAdopt }: Props) {
         })}
       </div>
 
-      {scan.unsupported.length > 0 && <section className="adoption-unsupported"><h2>Detected but not safely adoptable</h2><p>ZCOM cannot restore files that were replaced before it started managing them.</p><ul>{scan.unsupported.map(item => <li key={item}>{item}</li>)}</ul></section>}
+      {scan.unsupported.length > 0 && <section className="adoption-unsupported"><h2>Detected but not safely adoptable</h2><p>Zero Mod Manager cannot restore files that were replaced before it started managing them.</p><ul>{scan.unsupported.map(item => <li key={item}>{item}</li>)}</ul></section>}
 
       <footer className="dialog-actions">
         <button onClick={onClose} disabled={busy}>Close</button>

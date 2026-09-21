@@ -234,7 +234,10 @@ fn scan_packaged(
         let duplicate_extensions = extensions.len() != paths.len();
         let iostore = extensions.contains("utoc") || extensions.contains("ucas");
         let mut blocked = if owned_count > 0 {
-            Some("Some files in this container family are already managed by ZCOM.".into())
+            Some(
+                "Some files in this container family are already managed by Zero Mod Manager."
+                    .into(),
+            )
         } else if paths.iter().any(|(_, regular)| !regular) {
             Some("Symbolic links and other non-regular files cannot be adopted.".into())
         } else if duplicate_extensions {
@@ -386,7 +389,7 @@ fn scan_ue4ss(game: &Path, owned: &HashSet<String>) -> Result<Vec<CandidateSnaps
             continue;
         }
         let blocked = if owned_count > 0 {
-            Some("Some files in this UE4SS folder are already managed by ZCOM.".into())
+            Some("Some files in this UE4SS folder are already managed by Zero Mod Manager.".into())
         } else if unsafe_entry {
             Some("This folder contains a symbolic link or unreadable entry.".into())
         } else {
@@ -467,7 +470,7 @@ fn unsupported_replacements(game: &Path) -> Vec<String> {
             .any(|expected| name.eq_ignore_ascii_case(expected))
         {
             result.push(format!(
-                "{name} looks like a ReShade or injector file. ZCOM cannot adopt it safely without the original game file."
+                "{name} looks like a ReShade or injector file. Zero Mod Manager cannot adopt it safely without the original game file."
             ));
         }
     }

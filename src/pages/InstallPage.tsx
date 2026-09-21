@@ -10,6 +10,7 @@ const typeLabel: Record<PreviewType, string> = {
   ue4ss: "UE4SS mod",
   gamedir: "Game folder mod",
   plugin: "Plugin mod",
+  config: "Configuration mod",
   "ue4ss-runtime": "UE4SS runtime package"
 };
 

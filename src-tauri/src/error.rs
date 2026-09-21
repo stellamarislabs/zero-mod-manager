@@ -30,7 +30,7 @@ pub enum AppError {
     DeploymentConflict(PathBuf),
     /// The literal prefix is part of the contract with the interface, which
     /// recognises this failure to offer the override that resolves it.
-    #[error("A managed file changed outside ZCOM Mod Manager: {0}. Some mods write their own settings or data files there while the game runs.")]
+    #[error("A managed file changed outside Zero Mod Manager: {0}. Some mods write their own settings or data files there while the game runs.")]
     ChecksumMismatch(PathBuf),
     #[error("The installation preview expired. Inspect the mod again.")]
     PreviewExpired,
@@ -88,7 +88,7 @@ mod tests {
         let message =
             AppError::ChecksumMismatch(PathBuf::from("/game/mod/registry.txt")).to_string();
         assert!(
-            message.starts_with("A managed file changed outside ZCOM Mod Manager:"),
+            message.starts_with("A managed file changed outside Zero Mod Manager:"),
             "{message}"
         );
         assert!(message.contains("registry.txt"), "{message}");

@@ -25,7 +25,7 @@ for (const path of ["src-tauri/Cargo.toml", "src-tauri/Cargo.lock"]) {
   const match = contents.match(
     path.endsWith("Cargo.toml")
       ? /^\[package\]\s+[\s\S]*?^version\s*=\s*"([^"]+)"/m
-      : /^name\s*=\s*"zcom-mod-manager"\s+version\s*=\s*"([^"]+)"/m,
+      : /^name\s*=\s*"zero-mod-manager"\s+version\s*=\s*"([^"]+)"/m,
   );
   versions.set(path, match?.[1]);
 }

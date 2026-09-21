@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, LaunchReport, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, Ue4ssInstallReport, UpdateInfo } from "../types";
+import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, LaunchReport, LegacyImportReport, LegacyImportStatus, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, Ue4ssInstallReport, UpdateInfo } from "../types";
 
 export const backend = {
   dashboard: () => invoke<Dashboard>("get_dashboard"),
@@ -48,7 +48,9 @@ export const backend = {
   openManagedPath: (kind: "game" | "mods" | "logs" | "data" | "library" | "ue4ss-log" | `mod:${string}` | `installed:${string}`) => invoke<void>("open_managed_path", { kind }),
   launchGame: () => invoke<LaunchReport>("launch_game"),
   reportInterfaceError: (message: string, stack: string | null, context: string) => invoke<void>("report_interface_error", { message, stack, context }),
-  reportInterfaceLayout: (context: string) => invoke<void>("report_interface_layout", { context })
+  reportInterfaceLayout: (context: string) => invoke<void>("report_interface_layout", { context }),
+  legacyImportStatus: () => invoke<LegacyImportStatus>("legacy_import_status"),
+  importLegacyData: (includeNexusKey: boolean) => invoke<LegacyImportReport>("import_legacy_data", { includeNexusKey })
 };
 
 interface GameInfo {
@@ -70,7 +72,7 @@ interface GameInfo {
  * message prefix is the contract; `AppError::ChecksumMismatch` owns the text.
  */
 export function isChangedFileError(error: unknown): boolean {
-  return friendlyError(error).startsWith("A managed file changed outside ZCOM Mod Manager:");
+  return friendlyError(error).startsWith("A managed file changed outside Zero Mod Manager:");
 }
 
 export function friendlyError(error: unknown): string {

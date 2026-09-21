@@ -6,6 +6,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import brandMark from "./assets/icon.svg";
 import { Shell, type Page } from "./components/Shell";
 import { AdoptionDialog } from "./components/AdoptionDialog";
+import { StartupRecovery } from "./components/StartupRecovery";
+import { LegacyImportDialog } from "./components/LegacyImportDialog";
 import { useSubscription } from "./hooks/useSubscription";
 import { DiagnosticsPage } from "./pages/DiagnosticsPage";
 import { HomePage } from "./pages/HomePage";
@@ -14,7 +16,7 @@ import { ModsPage } from "./pages/ModsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AboutPage } from "./pages/AboutPage";
 import { backend, friendlyError, isChangedFileError } from "./services/backend";
-import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, DownloadProgress, ExistingModScan, FomodAnswer, FomodSession, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdate, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, UpdateInfo } from "./types";
+import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, DownloadProgress, ExistingModScan, FomodAnswer, FomodSession, LegacyImportStatus, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdate, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, UpdateInfo } from "./types";
 
 const defaultSettings: AppSettings = { gamePath: null, customExecutablePath: null, retocPath: null, sevenZipPath: null, logLevel: "normal", advancedPackageNames: false, reducedMotion: false, nexusAutoUpdateCheck: false };
 const defaultLinks: Links = { ue4ssDownload: "", nexusGame: "", nexusManager: "", project: "" };
@@ -94,6 +96,10 @@ export default function App() {
   const [discoveringExisting, setDiscoveringExisting] = useState(false);
   const [adoptingExisting, setAdoptingExisting] = useState(false);
   const [toast, setToast] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [bootstrapping, setBootstrapping] = useState(true);
+  const [legacyImport, setLegacyImport] = useState<LegacyImportStatus | null>(null);
+  const [importingLegacy, setImportingLegacy] = useState(false);
   const toastTimer = useRef<number | null>(null);
   const updateCheckStarted = useRef(false);
   const modUpdateCheckStarted = useRef(false);
@@ -104,6 +110,7 @@ export default function App() {
   const previewsRef = useRef<ModPreview[]>([]);
   const installerRef = useRef<FomodSession | null>(null);
   const inspectAttempt = useRef(0);
+  const legacyImportChecked = useRef(false);
 
   /**
    * Shows a message, and for a failure keeps it on screen until it is closed.
@@ -125,14 +132,58 @@ export default function App() {
     toastTimer.current = window.setTimeout(() => setToast(null), 4500);
   };
   const refresh = useCallback(async () => {
+    setBootstrapping(true);
+    setBootstrapError(null);
     try {
-      const [nextDashboard, nextMods, nextLoadOrder, nextSettings, nextLinks, nextNexus, nextModUpdates, nextManagedLibrary, nextSevenZip] = await Promise.all([backend.dashboard(), backend.mods(), backend.loadOrder(), backend.settings(), backend.links(), backend.nexusStatus(), backend.modUpdates(), backend.managedLibrary(), backend.sevenZipStatus()]);
-      setDashboard(nextDashboard); setMods(nextMods); setLoadOrder(nextLoadOrder); setSettings(nextSettings); setLinks(nextLinks); setNexus(nextNexus); setModUpdates(nextModUpdates); setManagedLibrary(nextManagedLibrary); setSevenZip(nextSevenZip);
-      document.documentElement.dataset.reduceMotion = String(nextSettings.reducedMotion);
-    } catch (error) { notify(friendlyError(error), "error"); }
+      const results = await Promise.allSettled([
+        backend.dashboard(),
+        backend.mods(),
+        backend.loadOrder(),
+        backend.settings(),
+        backend.links(),
+        backend.nexusStatus(),
+        backend.modUpdates(),
+        backend.managedLibrary(),
+        backend.sevenZipStatus(),
+      ] as const);
+      const [dashboardResult, modsResult, loadOrderResult, settingsResult, linksResult, nexusResult, modUpdatesResult, managedLibraryResult, sevenZipResult] = results;
+
+      if (dashboardResult.status === "rejected") {
+        setDashboard(null);
+        setBootstrapError(friendlyError(dashboardResult.reason));
+        return;
+      }
+
+      setDashboard(dashboardResult.value);
+      if (modsResult.status === "fulfilled") setMods(modsResult.value);
+      if (loadOrderResult.status === "fulfilled") setLoadOrder(loadOrderResult.value);
+      if (settingsResult.status === "fulfilled") {
+        setSettings(settingsResult.value);
+        document.documentElement.dataset.reduceMotion = String(settingsResult.value.reducedMotion);
+      }
+      if (linksResult.status === "fulfilled") setLinks(linksResult.value);
+      if (nexusResult.status === "fulfilled") setNexus(nexusResult.value);
+      if (modUpdatesResult.status === "fulfilled") setModUpdates(modUpdatesResult.value);
+      if (managedLibraryResult.status === "fulfilled") setManagedLibrary(managedLibraryResult.value);
+      if (sevenZipResult.status === "fulfilled") setSevenZip(sevenZipResult.value);
+
+      const secondaryFailure = results.slice(1).find(result => result.status === "rejected");
+      if (secondaryFailure?.status === "rejected") {
+        notify(`Some library details could not be loaded. ${friendlyError(secondaryFailure.reason)}`, "error");
+      }
+    } finally {
+      setBootstrapping(false);
+    }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!dashboard || legacyImportChecked.current) return;
+    legacyImportChecked.current = true;
+    void backend.legacyImportStatus()
+      .then(status => { if (status.available && status.canImport) setLegacyImport(status); })
+      .catch(error => void backend.reportInterfaceError(friendlyError(error), null, "legacy-import-status").catch(() => undefined));
+  }, [dashboard]);
   useEffect(() => {
     // Wait through two paints: a toggle updates its busy state, refreshed mod
     // data, and toast in adjacent React commits.
@@ -151,10 +202,10 @@ export default function App() {
     void discoverExisting(false);
   }, [dashboard?.game.detected, dashboard?.existingModScanPending]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (updateCheckStarted.current) return;
+    if (!links.project || updateCheckStarted.current) return;
     updateCheckStarted.current = true;
     void checkUpdates(false);
-  }, []);
+  }, [links.project]); // eslint-disable-line react-hooks/exhaustive-deps
   // The opt-in start-up check. The backend keeps its own stored result for a
   // few hours, so reopening the manager does not spend the Nexus allowance,
   // and a quiet failure stays quiet: only the button reports problems.
@@ -609,6 +660,19 @@ export default function App() {
     try { await backend.openManagedPath(kind); }
     catch (e) { notify(friendlyError(e), "error"); }
   }
+  async function importLegacyData(includeNexusKey: boolean) {
+    setImportingLegacy(true);
+    try {
+      const report = await backend.importLegacyData(includeNexusKey);
+      setLegacyImport(null);
+      await refresh();
+      notify(`Imported ${report.importedMods} mod${report.importedMods === 1 ? "" : "s"} and verified ${report.copiedFiles} files.${report.nexusKeyImported ? " Nexus credentials were copied." : ""}`);
+    } catch (error) {
+      notify(friendlyError(error), "error");
+    } finally {
+      setImportingLegacy(false);
+    }
+  }
   async function launchGame() {
     setLaunching(true);
     try {
@@ -623,7 +687,7 @@ export default function App() {
     try {
       const result = await backend.checkForUpdates();
       setUpdate(result);
-      if (announce) notify(result.updateAvailable ? `Version ${result.latestVersion} is available.` : "ZCOM Mod Manager is up to date.");
+      if (announce) notify(result.updateAvailable ? `Version ${result.latestVersion} is available.` : "Zero Mod Manager is up to date.");
     } catch (e) {
       const message = friendlyError(e);
       setUpdateError(message);
@@ -631,7 +695,15 @@ export default function App() {
     } finally { setUpdateChecking(false); }
   }
 
-  if (!dashboard) return <div className="splash"><img className="brand-mark" src={brandMark} alt="" width={96} height={96} /><p>Preparing your mod library…</p></div>;
+  if (!dashboard && bootstrapError) return <StartupRecovery
+    message={bootstrapError}
+    retrying={bootstrapping}
+    onRetry={() => void refresh()}
+    onOpenLogs={() => void backend.openManagedPath("logs").catch(error => {
+      setBootstrapError(current => `${current ?? "Startup failed."}\n\nCould not open logs: ${friendlyError(error)}`);
+    })}
+  />;
+  if (!dashboard) return <div className="splash" role="status"><img className="brand-mark" src={brandMark} alt="" width={96} height={96} /><p>Preparing your mod library…</p></div>;
   return <Shell page={page} onPage={setPage} gameReady={dashboard.game.detected} updateAvailable={update?.updateAvailable === true}>
     {page === "home" && <HomePage data={dashboard} onInstall={() => setPage("install")} onDiagnose={() => setPage("diagnostics")} onLocate={locateGame} onOpenMods={() => void openFolder("mods")} onOpenGame={() => void openFolder("game")} onLaunchGame={() => void launchGame()} onGetUe4ss={() => openExternal(links.ue4ssDownload)} onInstallUe4ss={() => void installUe4ss()} busy={loading} launching={launching} canLaunch={dashboard.game.detected || !!settings.customExecutablePath} existingModsFound={existingPrompt ? (existingScan?.candidates.length ?? 0) + (existingScan?.unsupported.length ?? 0) : 0} onDismissExisting={() => setExistingPrompt(false)} onReviewExisting={() => { setExistingPrompt(false); setPage("mods"); setExistingReview(true); }} />}
     {page === "mods" && <ModsPage mods={mods} loadOrder={loadOrder} orderPreview={orderPreview} orderBusy={orderBusy} onPreviewOrder={ids => void previewOrder(ids)} onApplyOrder={ids => void applyOrder(ids)} onApplyUe4ssOrder={ids => void applyUe4ssOrder(ids)} onCancelOrder={() => setOrderPreview(null)} onBrowseNexus={() => openExternal(links.nexusGame)} busy={busyMod} onInstall={() => setPage("install")} onDiscover={() => void discoverExisting(true)} discovering={discoveringExisting} onToggle={toggle} onUninstall={uninstall} onReconfigure={mod => void reconfigure(mod)} onVerify={verify} onRename={rename} onOpenInstalled={mod => void openFolder(`installed:${mod.id}`)} onOpenSource={mod => void openFolder(`mod:${mod.id}`)} updates={modUpdates} checkingUpdates={checkingMods} canCheckUpdates={nexus?.hasKey ?? false} directDownload={nexus?.premium ?? false} onCheckUpdates={() => void checkModUpdates(true)} onUpdateMod={update => void updateMod(update)} onLinkMod={(mod, reference) => void linkMod(mod, reference)} onSetModChecked={(mod, checked) => void setModChecked(mod, checked)} onOpenModPage={mod => { if (mod.nexusUrl) openExternal(mod.nexusUrl); }} onSetHidden={(mod, hidden) => void setHidden(mod, hidden)} />}
@@ -641,6 +713,7 @@ export default function App() {
     {page === "about" && <AboutPage projectUrl={links.project} nexusUrl={links.nexusManager} onOpenLink={openExternal} update={update} checking={updateChecking} error={updateError} onCheckUpdates={() => void checkUpdates(true)} />}
     {discoveringExisting && <div className="scan-indicator" role="status"><span className="spin" />Scanning game folders for existing mods…</div>}
     {existingReview && existingScan && <AdoptionDialog scan={existingScan} busy={adoptingExisting} onClose={() => setExistingReview(false)} onAdopt={adoptExisting} />}
+    {legacyImport && <LegacyImportDialog status={legacyImport} busy={importingLegacy} onClose={() => setLegacyImport(null)} onImport={includeKey => void importLegacyData(includeKey)} />}
     {toast && <div className={`toast ${toast.kind}`} role={toast.kind === "error" ? "alert" : "status"}>
       <p>{toast.text}</p>
       {toast.kind === "error" && <div className="toast-actions">

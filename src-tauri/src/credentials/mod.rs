@@ -10,7 +10,8 @@
 use crate::error::{AppError, Result};
 use rusqlite::Connection;
 
-const SERVICE: &str = "org.zcommodmanager.desktop";
+const SERVICE: &str = "app.zeromodmanager.desktop";
+const LEGACY_SERVICE: &str = "org.zcommodmanager.desktop";
 const ACCOUNT: &str = "nexus-api-key";
 const FALLBACK_SETTING: &str = "nexus_api_key";
 
@@ -26,6 +27,19 @@ pub enum Storage {
 
 fn entry() -> Option<keyring::Entry> {
     keyring::Entry::new(SERVICE, ACCOUNT).ok()
+}
+
+pub fn load_legacy(conn: &Connection) -> Option<String> {
+    if let Ok(entry) = keyring::Entry::new(LEGACY_SERVICE, ACCOUNT) {
+        if let Ok(password) = entry.get_password() {
+            if !password.trim().is_empty() {
+                return Some(password);
+            }
+        }
+    }
+    crate::database::get_setting(conn, FALLBACK_SETTING)
+        .ok()
+        .flatten()
 }
 
 /// Stores the key, preferring the OS secret store. Returns where it landed.

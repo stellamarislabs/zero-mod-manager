@@ -100,7 +100,7 @@ pub fn parse_nxm(url: &str) -> Result<NxmLink> {
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(format!(
-            "ZCOM Mod Manager/{} ({}; {})",
+            "Zero Mod Manager/{} ({}; {})",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH
@@ -123,7 +123,7 @@ async fn get_json(api_key: &str, url: &str) -> Result<serde_json::Value> {
     let response = client()?
         .get(url)
         .header("apikey", api_key)
-        .header("Application-Name", "ZCOM Mod Manager")
+        .header("Application-Name", "Zero Mod Manager")
         .header("Application-Version", env!("CARGO_PKG_VERSION"))
         .send()
         .await

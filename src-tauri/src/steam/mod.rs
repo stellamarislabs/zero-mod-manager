@@ -149,6 +149,28 @@ pub fn launch_from_appimage() -> Result<()> {
     Ok(())
 }
 
+/// Opens a host path without leaking AppImage runtime libraries into the
+/// desktop's file manager. The same contaminated environment that can break
+/// Steam also makes `xdg-open` silently exit when opening logs or mod folders.
+#[cfg(target_os = "linux")]
+pub fn open_path_from_appimage(path: &Path) -> Result<()> {
+    let appdir = std::env::var_os("APPDIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Other("The AppImage mount directory is unavailable.".into()))?;
+    let environment = sanitized_appimage_environment(&appdir, std::env::vars_os());
+    let opener = executable_in_path("xdg-open", &environment).ok_or_else(|| {
+        AppError::Other("The system file opener (xdg-open) was not found.".into())
+    })?;
+    std::process::Command::new(opener)
+        .arg(path)
+        .env_clear()
+        .envs(environment)
+        .spawn()
+        .map_err(|error| AppError::Other(format!("The folder could not be opened: {error}")))?;
+    Ok(())
+}
+
 fn quoted_value(text: &str, key: &str) -> Option<String> {
     let pattern = format!(r#""{}"\s+"([^"]*)""#, regex::escape(key));
     Regex::new(&pattern)
@@ -205,6 +227,8 @@ pub fn from_manual(path: &Path) -> Result<GameInfo> {
         engine: "UE 5.6.1".into(),
         compat_data_path: compat.map(|p| p.display().to_string()),
         source: "manual".into(),
+        problem_code: None,
+        problem: None,
     })
 }
 
@@ -251,6 +275,8 @@ pub fn discover_from_roots(roots: &[PathBuf]) -> Result<Option<GameInfo>> {
                 engine: "UE 5.6.1".into(),
                 compat_data_path: compat.exists().then(|| compat.display().to_string()),
                 source: "automatic".into(),
+                problem_code: None,
+                problem: None,
             }));
         }
     }

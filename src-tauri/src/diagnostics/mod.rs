@@ -39,6 +39,17 @@ pub fn run(
         (!game.detected).then(|| "Locate the game folder in Settings.".into()),
     ));
     items.push(item("Steam manifest",if game.steam_build_id.is_some(){"good"}else{"warning"},game.steam_build_id.as_deref().map(|id|format!("Build {id}")).unwrap_or_else(||"Build ID unavailable".into()),game.steam_build_id.is_none().then(||"Manual installations work, but build compatibility cannot be assessed without an app manifest.".into())));
+    if game.detected && game.steam_build_id.is_none() {
+        items.push(item(
+            "EA App / manual installation",
+            "warning",
+            "Experimental support",
+            Some(
+                "File deployment is supported, but launcher-specific UE4SS injection is not yet verified. Run the game once, then confirm that UE4SS.log appears before relying on runtime mods."
+                    .into(),
+            ),
+        ));
+    }
     let mods_folder = game
         .path
         .as_deref()
@@ -184,7 +195,7 @@ pub fn run(
         "GOOD"
     }
     .to_string();
-    let mut text = format!("ZCOM Mod Doctor\nOverall: {overall}\n\n");
+    let mut text = format!("Zero Mod Manager — Mod Doctor\nOverall: {overall}\n\n");
     for i in &items {
         text.push_str(&format!(
             "{:<30} {} — {}\n",

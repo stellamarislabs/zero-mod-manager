@@ -8,6 +8,9 @@ export interface GameInfo {
   engine: string;
   compatDataPath: string | null;
   source: "automatic" | "manual" | "none";
+  /** A recoverable discovery problem, such as a saved path moved elsewhere. */
+  problemCode?: "game_path_invalid" | string | null;
+  problem?: string | null;
 }
 
 export interface Ue4ssInfo {
@@ -106,6 +109,24 @@ export interface UpdateInfo {
   updateAvailable: boolean;
 }
 
+export interface LegacyImportStatus {
+  available: boolean;
+  dataDirectory: string | null;
+  libraryDirectory: string | null;
+  modCount: number;
+  fileCount: number;
+  canImport: boolean;
+  reason: string | null;
+}
+
+export interface LegacyImportReport {
+  importedMods: number;
+  copiedFiles: number;
+  copiedBytes: number;
+  nexusKeyImported: boolean;
+  backupPath: string;
+}
+
 export interface Dashboard {
   game: GameInfo;
   installedMods: number;
@@ -125,7 +146,7 @@ export interface ToolInfo {
 }
 
 /** What a payload is and where it is deployed. */
-export type ModType = "iostore" | "pak" | "ue4ss" | "gamedir" | "plugin";
+export type ModType = "iostore" | "pak" | "ue4ss" | "gamedir" | "plugin" | "config";
 /** A preview may also describe the UE4SS runtime, which is not a mod. */
 export type PreviewType = ModType | "ue4ss-runtime";
 

@@ -73,8 +73,94 @@ fn destination_base(game: &Path, kind: &str) -> PathBuf {
         "ue4ss" => game.join("SWZeroCompany/Binaries/Win64/ue4ss/Mods"),
         "gamedir" => game.to_path_buf(),
         "plugin" => game.join("SWZeroCompany/Mods"),
+        "config" => config_root(game),
         _ => game.join("SWZeroCompany/Content/Paks/~mods"),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn config_root(_game: &Path) -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("SWZeroCompany/Saved/Config/Windows")
+}
+
+#[cfg(target_os = "linux")]
+fn config_root(game: &Path) -> PathBuf {
+    proton_config_root(game)
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn proton_config_root(game: &Path) -> PathBuf {
+    let steamapps = game
+        .ancestors()
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("steamapps"))
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| game.to_path_buf());
+    steamapps.join("compatdata/2075800/pfx/drive_c/users/steamuser/AppData/Local/SWZeroCompany/Saved/Config/Windows")
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn config_root(_game: &Path) -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("SWZeroCompany/Saved/Config/Windows")
+}
+
+fn replaces_existing(kind: &str) -> bool {
+    matches!(kind, "gamedir" | "config")
+}
+
+fn game_is_running() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return std::process::Command::new("tasklist")
+            .args([
+                "/FI",
+                "IMAGENAME eq SWZeroCompany-Win64-Shipping.exe",
+                "/NH",
+            ])
+            .output()
+            .ok()
+            .is_some_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .to_ascii_lowercase()
+                    .contains("swzerocompany-win64-shipping.exe")
+            });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_dir("/proc").ok().is_some_and(|entries| {
+            entries.filter_map(std::result::Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+                    && std::fs::read(entry.path().join("cmdline"))
+                        .ok()
+                        .is_some_and(|bytes| {
+                            String::from_utf8_lossy(&bytes)
+                                .to_ascii_lowercase()
+                                .contains("swzerocompany-win64-shipping.exe")
+                        })
+            })
+        });
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    false
+}
+
+fn guard_config_write(kind: &str) -> Result<()> {
+    if kind == "config" && game_is_running() {
+        return Err(AppError::Other(
+            "Close Star Wars: Zero Company before changing a configuration mod. The game may overwrite settings while it exits.".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Removes the directories a mod's own payload leaves standing.
@@ -89,7 +175,7 @@ fn destination_base(game: &Path, kind: &str) -> PathBuf {
 /// installation, and the directories under it belong to the game rather than to
 /// any mod.
 fn prune_empty_dirs(game: &Path, kind: &str, removed: &[PathBuf]) {
-    if kind == "gamedir" {
+    if replaces_existing(kind) {
         return;
     }
     let base = destination_base(game, kind);
@@ -205,6 +291,7 @@ fn install_over(
     build: Option<String>,
     replacing: Option<&str>,
 ) -> Result<ModSummary> {
+    guard_config_write(&staged.mod_type)?;
     let id = Uuid::new_v4().to_string();
     let load_priority = match staged.mod_type.as_str() {
         "pak" | "iostore" => Some(database::next_load_priority(conn)?),
@@ -266,7 +353,7 @@ fn install_over(
                 file.destination_relative.clone()
             };
             let destination = base.join(destination_relative);
-            if staged.mod_type == "gamedir" && destination.exists() {
+            if replaces_existing(&staged.mod_type) && destination.exists() {
                 if database::destination_owner(conn, &destination.display().to_string(), replacing)?
                     .is_some()
                 {
@@ -390,6 +477,7 @@ pub fn replace(
     build: Option<String>,
     force: bool,
 ) -> Result<ModSummary> {
+    guard_config_write(&staged.mod_type)?;
     let old = database::mod_record(conn, old_id)?;
     let old_files = database::file_records(conn, old_id)?;
     let old_backups = database::backups(conn, old_id)?;
@@ -494,6 +582,7 @@ pub fn set_enabled(
     force: bool,
 ) -> Result<()> {
     let record = database::mod_record(conn, id)?;
+    guard_config_write(&record.mod_type)?;
     if record.enabled == enabled {
         return Ok(());
     }
@@ -507,7 +596,7 @@ pub fn set_enabled(
             // mods.txt while its payload remains deployed. Adoption records
             // that disabled state without touching the game folder; enabling
             // it later can safely reuse an identical live copy.
-            if record.mod_type != "gamedir"
+            if !replaces_existing(&record.mod_type)
                 && target.is_file()
                 && sha256(&target)? == sha256(&source)?
             {
@@ -519,7 +608,7 @@ pub fn set_enabled(
             // first is already in the library and is simply cleared; the second
             // replaces the stored original, so a later removal restores what
             // the game actually has rather than a stale copy.
-            if record.mod_type == "gamedir" && target.exists() {
+            if replaces_existing(&record.mod_type) && target.exists() {
                 let recorded = database::backup_for(conn, id, destination)?;
                 let current = sha256(&target)?;
                 match recorded {
@@ -576,6 +665,7 @@ pub fn uninstall(
     game: Option<&Path>,
 ) -> Result<()> {
     let record = database::mod_record(conn, id)?;
+    guard_config_write(&record.mod_type)?;
     let records = database::file_records(conn, id)?;
     // A mod adopted while disabled in mods.txt can still have its payload on
     // disk. Remove an exact managed copy regardless of the enabled flag, but
@@ -639,6 +729,15 @@ pub fn verify(conn: &Connection, id: &str) -> Result<String> {
 mod tests {
     use super::*;
     use crate::{database, models::PayloadFile};
+
+    #[test]
+    fn proton_config_follows_the_game_librarys_compatdata() {
+        let game = Path::new("/mnt/games/steamapps/common/Star Wars Zero Company");
+        assert_eq!(
+            proton_config_root(game),
+            PathBuf::from("/mnt/games/steamapps/compatdata/2075800/pfx/drive_c/users/steamuser/AppData/Local/SWZeroCompany/Saved/Config/Windows")
+        );
+    }
     use tempfile::tempdir;
     fn staged(root: &Path) -> StagedMod {
         let src = root.join("Test_P.pak");

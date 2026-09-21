@@ -11,6 +11,10 @@ pub struct GameInfo {
     pub engine: String,
     pub compat_data_path: Option<String>,
     pub source: String,
+    /// A recoverable discovery problem. This is data rather than a command
+    /// failure so a stale saved path cannot block the whole interface.
+    pub problem_code: Option<String>,
+    pub problem: Option<String>,
 }
 
 impl Default for GameInfo {
@@ -23,6 +27,8 @@ impl Default for GameInfo {
             engine: "UE 5.6.1".into(),
             compat_data_path: None,
             source: "none".into(),
+            problem_code: None,
+            problem: None,
         }
     }
 }
