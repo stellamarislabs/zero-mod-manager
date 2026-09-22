@@ -412,7 +412,11 @@ pub fn set_nexus_ids(
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0)).optional()?)
+    Ok(conn
+        .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?)
 }
 
 pub fn settings(conn: &Connection) -> Result<AppSettings> {
@@ -538,7 +542,13 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             0
         };
         result.push(ModSummary {
-            container_verification: conn.query_row("SELECT state FROM container_checks WHERE mod_id=?1", [&id], |row| row.get(0)).optional()?,
+            container_verification: conn
+                .query_row(
+                    "SELECT state FROM container_checks WHERE mod_id=?1",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .optional()?,
             id,
             bundle_id,
             name,
@@ -552,7 +562,8 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             potential_conflict_count: potential_conflict_count as usize,
             load_priority,
             nexus_mod_id: nexus_mod_id.map(|id| id as u64),
-            nexus_url: nexus_mod_id.map(|id| format!("https://www.nexusmods.com/starwarszerocompany/mods/{id}")),
+            nexus_url: nexus_mod_id
+                .map(|id| format!("https://www.nexusmods.com/starwarszerocompany/mods/{id}")),
             nexus_ignored,
             hidden,
             fomod,
@@ -599,7 +610,10 @@ pub fn insert_mod(
 ) -> Result<()> {
     tx.execute("INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,installed_build,load_priority) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![summary.id,summary.name,summary.version,summary.mod_type,deployment_key,source,summary.installed_at,summary.enabled,summary.installed_build,summary.load_priority])?;
     if let Some(state) = &summary.container_verification {
-        tx.execute("INSERT INTO container_checks(mod_id,state) VALUES(?1,?2)", params![summary.id, state])?;
+        tx.execute(
+            "INSERT INTO container_checks(mod_id,state) VALUES(?1,?2)",
+            params![summary.id, state],
+        )?;
     }
     for (library, destination, size, hash) in file_rows {
         tx.execute("INSERT INTO mod_files(mod_id,library_relative,destination,size,sha256) VALUES(?1,?2,?3,?4,?5)",params![summary.id,library,destination,*size as i64,hash])?;
@@ -927,9 +941,19 @@ mod tests {
         tx.commit().unwrap();
         drop(conn);
         let conn = open(&path).unwrap();
-        assert_eq!(list_mods(&conn).unwrap()[0].container_verification.as_deref(), Some("unavailable"));
-        conn.execute("DELETE FROM mods WHERE id='unchecked'", []).unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM container_checks", [], |row| row.get(0)).unwrap();
+        assert_eq!(
+            list_mods(&conn).unwrap()[0]
+                .container_verification
+                .as_deref(),
+            Some("unavailable")
+        );
+        conn.execute("DELETE FROM mods WHERE id='unchecked'", [])
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM container_checks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(count, 0);
     }
 

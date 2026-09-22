@@ -150,7 +150,15 @@ fn candidate(spec: CandidateSpec<'_>) -> CandidateSnapshot {
         .collect();
     CandidateSnapshot {
         public: ExistingModCandidate {
-            container_verification: (spec.mod_type == "iostore").then(|| if spec.warnings.contains(&AppError::RetocNotFound.to_string()) { "unavailable".into() } else if adoptable { "passed".into() } else { "failed".into() }),
+            container_verification: (spec.mod_type == "iostore").then(|| {
+                if spec.warnings.contains(&AppError::RetocNotFound.to_string()) {
+                    "unavailable".into()
+                } else if adoptable {
+                    "passed".into()
+                } else {
+                    "failed".into()
+                }
+            }),
             id,
             name: spec.name,
             version: spec.version,
@@ -640,8 +648,14 @@ fn adopt_group(
                 .unwrap_or_else(|| "That candidate cannot be adopted safely.".into()),
         ));
     }
-    if candidates.iter().any(|item| item.public.container_verification.as_deref() == Some("unavailable")) && !group.allow_unverified {
-        return Err(AppError::Other("Confirm adoption without container verification to continue.".into()));
+    if candidates
+        .iter()
+        .any(|item| item.public.container_verification.as_deref() == Some("unavailable"))
+        && !group.allow_unverified
+    {
+        return Err(AppError::Other(
+            "Confirm adoption without container verification to continue.".into(),
+        ));
     }
     let packaged = candidates
         .iter()
@@ -763,7 +777,16 @@ fn adopt_group(
         .flat_map(|item| item.deployment_keys.clone())
         .collect::<Vec<_>>();
     let summary = ModSummary {
-        container_verification: (mod_type == "iostore").then(|| if candidates.iter().any(|item| item.public.container_verification.as_deref() == Some("unavailable")) { "unavailable".into() } else { "passed".into() }),
+        container_verification: (mod_type == "iostore").then(|| {
+            if candidates
+                .iter()
+                .any(|item| item.public.container_verification.as_deref() == Some("unavailable"))
+            {
+                "unavailable".into()
+            } else {
+                "passed".into()
+            }
+        }),
         id: id.clone(),
         bundle_id: None,
         name,
@@ -867,7 +890,7 @@ mod tests {
     fn record_owned(conn: &mut Connection, path: &Path) {
         let hash = sha256(path).unwrap();
         let summary = ModSummary {
-        container_verification: None,
+            container_verification: None,
             id: Uuid::new_v4().to_string(),
             bundle_id: None,
             name: "Owned".into(),

@@ -24,7 +24,8 @@ manual platform qualification. Last local test record: 2026-09-22.
 The three ignored Rust tests require legal local copies of an IoStore triplet,
 mod archives, and a UE4SS distribution package. They are release qualification
 tests, not silently waived coverage. Clippy is also a CI gate; the local host
-does not currently have the component installed.
+does not currently have the component installed. Rust formatting was checked
+locally after the release-preparation changes; hosted CI is not yet signed off.
 
 ## Stable blockers outside the local automated suite
 

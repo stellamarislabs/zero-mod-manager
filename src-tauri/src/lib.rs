@@ -114,7 +114,11 @@ pub fn run() {
             let mut conn = database::open(&db_path)
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
             if let Err(error) = credentials::retire(&conn) {
-                bootstrap_log(&logs_dir, "retired_credential_cleanup_pending", &error.to_string());
+                bootstrap_log(
+                    &logs_dir,
+                    "retired_credential_cleanup_pending",
+                    &error.to_string(),
+                );
             }
             load_order::recover(&conn, &data_dir.join("load-order-operation.json"))
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;

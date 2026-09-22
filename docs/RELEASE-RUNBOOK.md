@@ -5,16 +5,16 @@
 The continuation repository is https://github.com/stellamarislabs/zero-mod-manager.
 Its issue tracker is https://github.com/stellamarislabs/zero-mod-manager/issues.
 The working tree originates from arctco/zcom-mod-manager. Do not push
-continuation commits or tags there. Create/select the owner's continuation repository
-first; preserve the original remote as upstream and configure origin only after
-the destination is verified. Never use an invented Nexus mod ID or repository URL.
+continuation commits or tags there. The approved continuation repository has been created; origin points there and
+upstream preserves the original repository. Never use an invented Nexus mod ID or repository URL.
 Enable Issues and publish the modified source, license, attribution and build scripts.
 
 The release workflow derives project/update URLs from github.repository, refuses
 the original upstream repository, and creates a **draft** release. Set the optional
 ZERO_MOD_MANAGER_NEXUS_URL repository variable only after the real page exists.
 No tag should be pushed until the source tree has been reviewed for credentials,
-personal paths and unintended assets. Do not use git add . on this working tree:
+personal paths and unintended assets. A reviewed source snapshot can be committed through a temporary Git index to
+preserve the user's existing staging state. Do not use git add . on this working tree:
 output/, artifacts/, game fixtures and generated evidence are not source commits.
 
 ## Local handoff

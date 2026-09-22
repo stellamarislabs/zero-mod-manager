@@ -17,9 +17,18 @@ pub struct Inspection {
 }
 
 /// Only an absent verifier may be waived, never a failed verification.
-pub fn require_install_consent(staged: &crate::models::StagedMod, allow_unverified: bool) -> Result<()> {
-    if staged.mod_type != "iostore" { return Ok(()); }
-    check_verification(&staged.verification, staged.verification_details.as_deref(), allow_unverified)
+pub fn require_install_consent(
+    staged: &crate::models::StagedMod,
+    allow_unverified: bool,
+) -> Result<()> {
+    if staged.mod_type != "iostore" {
+        return Ok(());
+    }
+    check_verification(
+        &staged.verification,
+        staged.verification_details.as_deref(),
+        allow_unverified,
+    )
 }
 
 fn check_verification(state: &str, detail: Option<&str>, allow_unverified: bool) -> Result<()> {

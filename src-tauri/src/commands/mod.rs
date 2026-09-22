@@ -7,9 +7,9 @@ use crate::{
         CompatibilityReport, ConfigChangePreview, ConfigDocument, ConfigPatchRecord, Dashboard,
         DiagnosticReport, ExistingModScan, GameInfo, Inspection, IsolationSession, LaunchPreflight,
         LaunchReport, LaunchSession, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo,
-        ModPreview, ModSummary, OperationRecord, PackageAssessment,
-        ProfileDetail, ProfileLock, ProfileSummary, ProfileSwitchPreview, ReplacedMod,
-        SnapshotSummary, StagedMod, SupportBundlePreview, SupportBundleReport, ToolInfo,
+        ModPreview, ModSummary, OperationRecord, PackageAssessment, ProfileDetail, ProfileLock,
+        ProfileSummary, ProfileSwitchPreview, ReplacedMod, SnapshotSummary, StagedMod,
+        SupportBundlePreview, SupportBundleReport, ToolInfo,
     },
     mods, operations, profiles, retoc, sessions, steam, support, ue4ss, AppContext,
 };
@@ -2562,8 +2562,8 @@ pub fn create_support_bundle(
 #[cfg(test)]
 mod update_tests {
     use super::{
-        configured_executable, copy_library_for_move, manual_game_or_unavailable,
-        replaced_by, version_is_newer,
+        configured_executable, copy_library_for_move, manual_game_or_unavailable, replaced_by,
+        version_is_newer,
     };
     use crate::{
         database,

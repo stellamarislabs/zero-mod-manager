@@ -54,6 +54,7 @@ try {
     $provenance = [ordered]@{
         version=$version; preparedUtc=[DateTime]::UtcNow.ToString('o'); channel='rc'; gameAcceptance='pending';
         project=$env:ZERO_MOD_MANAGER_PROJECT_URL; releaseApi=$env:ZERO_MOD_MANAGER_RELEASE_API;
+        sourceCommit=$env:ZERO_SOURCE_COMMIT;
         baseCommit=(git rev-parse HEAD); sourceState='working-tree snapshot, not a claim that baseCommit contains all changes';
         sourceArchive=$sourceName; sourceSha256=(Get-FileHash -LiteralPath (Join-Path $out $sourceName)).Hash.ToLowerInvariant();
         executableSha256=(Get-FileHash -LiteralPath $exe).Hash.ToLowerInvariant();
