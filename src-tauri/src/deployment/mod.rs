@@ -79,14 +79,14 @@ fn destination_base(game: &Path, kind: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-fn config_root(_game: &Path) -> PathBuf {
+pub(crate) fn config_root(_game: &Path) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("SWZeroCompany/Saved/Config/Windows")
 }
 
 #[cfg(target_os = "linux")]
-fn config_root(game: &Path) -> PathBuf {
+pub(crate) fn config_root(game: &Path) -> PathBuf {
     proton_config_root(game)
 }
 
@@ -104,7 +104,7 @@ fn proton_config_root(game: &Path) -> PathBuf {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn config_root(_game: &Path) -> PathBuf {
+pub(crate) fn config_root(_game: &Path) -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("SWZeroCompany/Saved/Config/Windows")
@@ -114,7 +114,7 @@ fn replaces_existing(kind: &str) -> bool {
     matches!(kind, "gamedir" | "config")
 }
 
-fn game_is_running() -> bool {
+pub(crate) fn game_is_running() -> bool {
     #[cfg(target_os = "windows")]
     {
         return std::process::Command::new("tasklist")
@@ -154,13 +154,15 @@ fn game_is_running() -> bool {
     false
 }
 
-fn guard_config_write(kind: &str) -> Result<()> {
-    if kind == "config" && game_is_running() {
-        return Err(AppError::Other(
-            "Close Star Wars: Zero Company before changing a configuration mod. The game may overwrite settings while it exits.".into(),
-        ));
+pub(crate) fn ensure_game_stopped() -> Result<()> {
+    if game_is_running() {
+        return Err(AppError::GameRunning);
     }
     Ok(())
+}
+
+fn guard_config_write(_kind: &str) -> Result<()> {
+    ensure_game_stopped()
 }
 
 /// Removes the directories a mod's own payload leaves standing.
@@ -280,6 +282,74 @@ pub fn install(
     install_over(conn, library, game, staged, build, None)
 }
 
+/// Installs every component from one inspected archive as a single operation.
+///
+/// This intentionally handles fresh installs only. Replacements need a second
+/// journal capable of restoring every previous version, so callers reject
+/// those until that stronger transaction exists. If any fresh component fails,
+/// every component already deployed by this call is removed in reverse order.
+pub fn install_bundle(
+    conn: &mut Connection,
+    library: &Path,
+    game: &Path,
+    staged: &[StagedMod],
+    build: Option<String>,
+    bundle_id: &str,
+) -> Result<Vec<ModSummary>> {
+    let mut installed = Vec::with_capacity(staged.len());
+    for component in staged {
+        match install(conn, library, game, component, build.clone()) {
+            Ok(mut summary) => {
+                if let Err(error) = database::set_bundle_id(conn, &summary.id, bundle_id) {
+                    installed.push(summary);
+                    let rollback = rollback_bundle(conn, library, game, &installed);
+                    return Err(bundle_error(error, rollback));
+                }
+                summary.bundle_id = Some(bundle_id.to_string());
+                installed.push(summary);
+            }
+            Err(error) => {
+                let rollback = rollback_bundle(conn, library, game, &installed);
+                return Err(bundle_error(error, rollback));
+            }
+        }
+    }
+    Ok(installed)
+}
+
+fn bundle_error(error: AppError, rollback: Result<()>) -> AppError {
+    match rollback {
+        Ok(()) => AppError::Other(format!(
+            "The bundle was not installed. All completed components were rolled back. {error}"
+        )),
+        Err(rollback_error) => AppError::Other(format!(
+            "The bundle failed and rollback also needs attention. Install error: {error}. Rollback error: {rollback_error}"
+        )),
+    }
+}
+
+/// Removes the components created by `install_bundle`, last installed first.
+/// It is also used by command-level metadata/order failures before staging is
+/// consumed, keeping the archive available for a corrected retry.
+pub fn rollback_bundle(
+    conn: &Connection,
+    library: &Path,
+    game: &Path,
+    installed: &[ModSummary],
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for summary in installed.iter().rev() {
+        if let Err(error) = uninstall(conn, library, &summary.id, true, Some(game)) {
+            failures.push(format!("{}: {error}", summary.name));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Other(failures.join("; ")))
+    }
+}
+
 /// Installs a payload, optionally taking over the files of the mod it replaces.
 /// `replacing` is excluded from every ownership check: an upgrade lands on the
 /// same names by definition, and `replace` has already moved those files aside.
@@ -394,7 +464,9 @@ fn install_over(
         return Err(error);
     }
     let summary = ModSummary {
+        container_verification: (staged.mod_type == "iostore").then(|| staged.verification.clone()),
         id: id.clone(),
+        bundle_id: None,
         name: staged.name.clone(),
         version: staged.version.clone(),
         mod_type: staged.mod_type.clone(),
@@ -750,6 +822,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "pak".into(),
             deployment_keys: Vec::new(),
             files: vec![PayloadFile {
@@ -888,6 +961,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "ue4ss".into(),
             deployment_keys: vec!["ZCOMSquadSix".into()],
             files: vec![PayloadFile {
@@ -1044,6 +1118,65 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn a_failed_bundle_rolls_back_every_component_already_installed() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        let first = staged(d.path());
+        let mut colliding = first.clone();
+        colliding.staging_id = "second".into();
+        colliding.name = "Second component".into();
+
+        let error =
+            install_bundle(&mut c, &l, &g, &[first, colliding], None, "bundle-test").unwrap_err();
+
+        assert!(error.to_string().contains("rolled back"), "{error}");
+        assert!(database::list_mods(&c).unwrap().is_empty());
+        assert!(
+            !g.join("SWZeroCompany/Content/Paks/~mods/Test_P.pak")
+                .exists(),
+            "the first component must not survive the second one's failure"
+        );
+        assert_eq!(
+            fs::read_dir(&l).unwrap().count(),
+            0,
+            "rolled-back library payloads must also be removed"
+        );
+    }
+
+    #[test]
+    fn a_successful_bundle_persists_one_shared_identity() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        fs::create_dir_all(d.path().join("second")).unwrap();
+        let first = staged(d.path());
+        let mut second = staged(&d.path().join("second"));
+        second.staging_id = "second".into();
+        second.name = "Second component".into();
+        second.files[0].library_relative = "Second_P.pak".into();
+        second.files[0].destination_relative = "Second_P.pak".into();
+
+        let installed =
+            install_bundle(&mut c, &l, &g, &[first, second], None, "bundle-test").unwrap();
+
+        assert_eq!(installed.len(), 2);
+        assert!(installed
+            .iter()
+            .all(|component| component.bundle_id.as_deref() == Some("bundle-test")));
+        assert!(database::list_mods(&c)
+            .unwrap()
+            .iter()
+            .all(|component| component.bundle_id.as_deref() == Some("bundle-test")));
+    }
+
     fn gamedir(root: &Path, relative: &str, body: &[u8]) -> StagedMod {
         let src = root.join("payload.bin");
         fs::write(&src, body).unwrap();
@@ -1055,6 +1188,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "gamedir".into(),
             deployment_keys: Vec::new(),
             files: vec![PayloadFile {
@@ -1178,6 +1312,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "ue4ss".into(),
             deployment_keys: vec!["ShadowsCore".into(), "ShadowsTweaks".into()],
             files: ["ShadowsCore", "ShadowsTweaks"]
@@ -1222,6 +1357,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "ue4ss".into(),
             deployment_keys: vec![folder.into()],
             files: vec![PayloadFile {

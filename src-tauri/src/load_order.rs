@@ -714,6 +714,7 @@ mod tests {
             version: None,
             author: None,
             description: None,
+            manifest: None,
             mod_type: "iostore".into(),
             deployment_keys: Vec::new(),
             files,

@@ -150,6 +150,7 @@ fn candidate(spec: CandidateSpec<'_>) -> CandidateSnapshot {
         .collect();
     CandidateSnapshot {
         public: ExistingModCandidate {
+            container_verification: (spec.mod_type == "iostore").then(|| if spec.warnings.contains(&AppError::RetocNotFound.to_string()) { "unavailable".into() } else if adoptable { "passed".into() } else { "failed".into() }),
             id,
             name: spec.name,
             version: spec.version,
@@ -251,7 +252,7 @@ fn scan_packaged(
             None
         };
         let mut packages = Vec::new();
-        let warnings = Vec::new();
+        let mut warnings = Vec::new();
         if iostore && blocked.is_none() {
             let utoc = paths
                 .iter()
@@ -260,6 +261,7 @@ fn scan_packaged(
                 .expect("complete IoStore candidate has a UTOC");
             match retoc::inspect(tool, utoc) {
                 Ok(inspection) => packages = inspection.package_ids,
+                Err(AppError::RetocNotFound) => warnings.push(AppError::RetocNotFound.to_string()),
                 Err(error) => blocked = Some(error.to_string()),
             }
         }
@@ -638,6 +640,9 @@ fn adopt_group(
                 .unwrap_or_else(|| "That candidate cannot be adopted safely.".into()),
         ));
     }
+    if candidates.iter().any(|item| item.public.container_verification.as_deref() == Some("unavailable")) && !group.allow_unverified {
+        return Err(AppError::Other("Confirm adoption without container verification to continue.".into()));
+    }
     let packaged = candidates
         .iter()
         .all(|item| matches!(item.public.mod_type.as_str(), "pak" | "iostore"));
@@ -758,7 +763,9 @@ fn adopt_group(
         .flat_map(|item| item.deployment_keys.clone())
         .collect::<Vec<_>>();
     let summary = ModSummary {
+        container_verification: (mod_type == "iostore").then(|| if candidates.iter().any(|item| item.public.container_verification.as_deref() == Some("unavailable")) { "unavailable".into() } else { "passed".into() }),
         id: id.clone(),
+        bundle_id: None,
         name,
         version: candidates
             .iter()
@@ -860,7 +867,9 @@ mod tests {
     fn record_owned(conn: &mut Connection, path: &Path) {
         let hash = sha256(path).unwrap();
         let summary = ModSummary {
+        container_verification: None,
             id: Uuid::new_v4().to_string(),
+            bundle_id: None,
             name: "Owned".into(),
             version: None,
             mod_type: "pak".into(),
@@ -971,6 +980,7 @@ mod tests {
             .candidates
             .iter()
             .map(|item| AdoptionGroup {
+                allow_unverified: false,
                 candidate_ids: vec![item.id.clone()],
                 name: item.name.clone(),
             })
@@ -1039,6 +1049,7 @@ mod tests {
             &data,
             &held,
             &[AdoptionGroup {
+                allow_unverified: false,
                 candidate_ids: public
                     .candidates
                     .iter()
@@ -1078,6 +1089,7 @@ mod tests {
             &data,
             &held,
             &[AdoptionGroup {
+                allow_unverified: false,
                 candidate_ids: vec![public.candidates[0].id.clone()],
                 name: "Quiet".into(),
             }],

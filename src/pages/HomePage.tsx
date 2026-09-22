@@ -1,6 +1,10 @@
-import { Activity, Download, ExternalLink, FileArchive, FolderOpen, PackageCheck, Play, Puzzle, ShieldCheck } from "lucide-react";
-import type { Dashboard } from "../types";
-import { StatusBadge } from "../components/StatusBadge";
+import { useMemo, useState } from "react";
+import { Activity, Boxes, CheckCircle2, ChevronRight, CircleHelp, CircleX, Download, ExternalLink, FileArchive, FileText, FolderOpen, Gamepad2, Layers3, ListTree, Puzzle, Search, ShieldCheck, SlidersHorizontal, TriangleAlert, Wrench, type LucideIcon } from "lucide-react";
+import { LaunchControls } from "../components/LaunchControls";
+import type { CompatibilityReport, Dashboard, LaunchMode, LaunchPreflight, LoadOrderState, OperationRecord, OperationalStatus, ProfileDetail, SnapshotSummary } from "../types";
+
+type CommandView = "readiness" | "operations" | "activity";
+type SystemId = "game" | "runtime" | "profile" | "load-order" | "compatibility";
 
 interface Props {
   data: Dashboard;
@@ -10,9 +14,7 @@ interface Props {
   onOpenMods: () => void;
   onOpenGame: () => void;
   onLaunchGame: () => void;
-  /// Opens the tested Zero Company UE4SS build on Nexus Mods in the browser.
   onGetUe4ss: () => void;
-  /// Installs a UE4SS package the user has already downloaded.
   onInstallUe4ss: () => void;
   busy: boolean;
   launching: boolean;
@@ -20,40 +22,231 @@ interface Props {
   existingModsFound?: number;
   onReviewExisting?: () => void;
   onDismissExisting?: () => void;
+  profile?: ProfileDetail | null;
+  preflight?: LaunchPreflight | null;
+  recentActivity?: OperationRecord[];
+  compatibility?: CompatibilityReport | null;
+  loadOrder?: LoadOrderState | null;
+  snapshots?: SnapshotSummary[];
+  onLaunchMode?: (mode: LaunchMode) => void;
+  onProfiles?: () => void;
+  onHealth?: () => void;
+  onLibrary?: () => void;
+  hideLaunchControls?: boolean;
 }
 
-export function HomePage({ data, onInstall, onDiagnose, onLocate, onOpenMods, onOpenGame, onLaunchGame, onGetUe4ss, onInstallUe4ss, busy, launching, canLaunch = data.game.detected, existingModsFound, onReviewExisting, onDismissExisting }: Props) {
+interface SystemZone {
+  id: SystemId;
+  label: string;
+  status: OperationalStatus;
+  metric: string;
+  summary: string;
+  evidence: string;
+  icon: LucideIcon;
+  actionLabel: string;
+  action?: () => void;
+  secondaryLabel?: string;
+  secondaryAction?: () => void;
+}
+
+const statusCopy: Record<OperationalStatus, string> = {
+  ready: "Ready",
+  warning: "Warning",
+  blocked: "Blocked",
+  unverified: "Unverified",
+};
+
+function formatDate(value?: string | null) {
+  if (!value) return "No record";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+export function HomePage({
+  data,
+  onInstall,
+  onDiagnose,
+  onLocate,
+  onOpenMods,
+  onOpenGame,
+  onLaunchGame,
+  onGetUe4ss,
+  onInstallUe4ss,
+  busy,
+  launching,
+  canLaunch = data.game.detected,
+  existingModsFound,
+  onReviewExisting,
+  onDismissExisting,
+  profile,
+  preflight,
+  recentActivity = [],
+  compatibility,
+  loadOrder,
+  snapshots = [],
+  onLaunchMode,
+  onProfiles,
+  onHealth,
+  onLibrary,
+  hideLaunchControls = false,
+}: Props) {
   const { game, ue4ss } = data;
-  // "Healthy" used to mean only that the files were in place, which told a
-  // user whose game never loaded the runtime that nothing was wrong. The badge
-  // now waits for the log UE4SS writes when it actually runs, and for the
-  // absence of a second proxy DLL that would load instead of it.
-  const loaded = ue4ss.healthy && ue4ss.logFound && ue4ss.extraLoaders.length === 0;
-  return <div className="page">
-    <header className="hero">
-      <div><p className="eyebrow">TACTICAL MOD CONTROL</p><h1>Star Wars: Zero Company</h1><p className="muted">A safe, purpose-built manager for packaged and UE4SS mods.</p></div>
-      <div className="hero-actions"><StatusBadge status={game.detected ? "good" : "error"}>{game.detected ? "Game detected" : "Game not detected"}</StatusBadge><button className="primary" onClick={onLaunchGame} disabled={!canLaunch || launching}><Play aria-hidden size={17} />{launching ? "Launching…" : "Launch game"}</button></div>
-    </header>
-    {!game.detected && <section className="callout warning" role="alert"><div><h2>{game.problemCode === "game_path_invalid" ? "Your saved game location moved" : "Locate your game installation"}</h2><p>{game.problem ?? "Automatic Steam discovery did not find a valid Zero Company installation."}</p>{game.problemCode === "game_path_invalid" && game.path && <small className="stale-path">Saved location: <code>{game.path}</code></small>}</div><button className="primary" onClick={onLocate}>Locate game</button></section>}
+  const [view, setView] = useState<CommandView>("readiness");
+  const [selectedSystem, setSelectedSystem] = useState<SystemId>("compatibility");
+
+  const runtimeLoaded = ue4ss.healthy && ue4ss.logFound && ue4ss.extraLoaders.length === 0;
+  const activeConflicts = loadOrder?.activeConflicts.length ?? data.conflictCount;
+  const lastSnapshot = snapshots[0];
+  const lastOperation = recentActivity[0];
+
+  const systems = useMemo<SystemZone[]>(() => [
+    {
+      id: "game",
+      label: "Game",
+      status: game.detected ? "ready" : "blocked",
+      metric: game.steamBuildId ? `Build ${game.steamBuildId}` : "No build",
+      summary: game.detected ? `${game.source === "ea" ? "EA App" : game.source === "manual" ? "Manual" : "Steam"} installation verified.` : "Zero Company installation is not verified.",
+      evidence: game.detected ? (game.path ?? "Detected installation") : (game.problem ?? "No valid executable location is available."),
+      icon: Gamepad2,
+      actionLabel: game.detected ? "Open game folder" : "Locate game",
+      action: game.detected ? onOpenGame : onLocate,
+    },
+    {
+      id: "runtime",
+      label: "Runtime",
+      status: runtimeLoaded ? "ready" : ue4ss.installed ? "warning" : "unverified",
+      metric: ue4ss.installed ? `${ue4ss.modCount} UE4SS mod${ue4ss.modCount === 1 ? "" : "s"}` : "Not installed",
+      summary: runtimeLoaded ? "UE4SS load is proven by runtime log evidence." : ue4ss.installed ? "Runtime files exist, but a clean load has not been proven." : "UE4SS is optional until a mod requires it.",
+      evidence: ue4ss.message ?? (ue4ss.logFound ? "Runtime log found" : "No runtime log evidence yet"),
+      icon: Puzzle,
+      actionLabel: "Open Health",
+      action: onHealth ?? onDiagnose,
+      secondaryLabel: ue4ss.installed ? "Update package" : "Install package",
+      secondaryAction: onInstallUe4ss,
+    },
+    {
+      id: "profile",
+      label: "Profile",
+      status: profile ? "ready" : "unverified",
+      metric: `${profile?.enabledMods ?? data.enabledMods} enabled`,
+      summary: profile ? `${profile.name} is the active deployment profile.` : "No named profile is loaded; the current deployment is still usable.",
+      evidence: profile?.requiredRuntime ? `Requires runtime ${profile.requiredRuntime}` : "No profile-specific runtime requirement",
+      icon: Layers3,
+      actionLabel: "Manage profiles",
+      action: onProfiles,
+    },
+    {
+      id: "load-order",
+      label: "Load Order",
+      status: activeConflicts > 0 || loadOrder?.unapplied ? "warning" : loadOrder ? "ready" : "unverified",
+      metric: activeConflicts ? `${activeConflicts} conflict${activeConflicts === 1 ? "" : "s"}` : "No active conflict",
+      summary: loadOrder?.unapplied ? "A reviewed ordering change has not been deployed yet." : activeConflicts ? "Overlapping payloads need an explicit winner." : "No active file winner conflict is reported.",
+      evidence: loadOrder ? `${loadOrder.entries.length} packaged and ${loadOrder.ue4ssEntries.length} runtime entries tracked` : "Load-order graph has not been loaded",
+      icon: ListTree,
+      actionLabel: "Open Library",
+      action: onLibrary,
+      secondaryLabel: "Open mods folder",
+      secondaryAction: onOpenMods,
+    },
+    {
+      id: "compatibility",
+      label: "Compatibility",
+      status: compatibility?.status ?? "unverified",
+      metric: compatibility ? `${compatibility.issues.length} finding${compatibility.issues.length === 1 ? "" : "s"}` : "Awaiting analysis",
+      summary: compatibility ? (compatibility.issues.length ? "Local analysis and catalog evidence have findings to review." : "No compatibility finding is reported for this profile.") : "Compatibility is not guessed when evidence is unavailable.",
+      evidence: compatibility ? `Catalog: ${compatibility.catalogState} · ${formatDate(compatibility.generatedAt)}` : "Run Health to produce current evidence",
+      icon: Puzzle,
+      actionLabel: "Review compatibility",
+      action: onHealth ?? onDiagnose,
+    },
+  ], [compatibility, data.enabledMods, game, loadOrder, activeConflicts, onDiagnose, onHealth, onInstallUe4ss, onLibrary, onLocate, onOpenGame, onOpenMods, onProfiles, preflight, profile, runtimeLoaded, ue4ss]);
+
+  const activeSystem = systems.find(system => system.id === selectedSystem) ?? systems[0];
+  const ActiveSystemIcon = activeSystem.icon;
+  const findings = compatibility?.issues ?? [];
+  const evidenceRows = selectedSystem === "compatibility" ? [
+    { title: "Compatibility catalog", detail: compatibility?.catalogState ?? "No catalog evidence available", status: compatibility ? compatibility.status : "unverified" },
+    { title: "Local file analysis", detail: `${activeConflicts} active overlap${activeConflicts === 1 ? "" : "s"} reported`, status: loadOrder ? activeConflicts ? "warning" : "ready" : "unverified" },
+    { title: "Rule findings", detail: findings[0]?.title ?? (compatibility ? "No findings in the current report" : "Analysis has not been loaded"), status: compatibility?.status ?? "unverified" },
+    { title: "Game build", detail: game.steamBuildId ?? "Build not identified", status: game.detected ? "ready" : "blocked" },
+  ] : [
+    { title: activeSystem.label, detail: activeSystem.evidence, status: activeSystem.status },
+    { title: "Active profile", detail: profile?.name ?? "No named profile loaded", status: profile ? "ready" : "unverified" },
+    { title: "Runtime load evidence", detail: runtimeLoaded ? "UE4SS runtime log found" : "No clean runtime load confirmed", status: runtimeLoaded ? "ready" : "unverified" },
+    { title: "Last checkpoint", detail: lastSnapshot?.label ?? "No checkpoint recorded", status: lastSnapshot ? "ready" : "unverified" },
+  ];
+  const detailStats = selectedSystem === "compatibility" ? [
+    { value: compatibility ? findings.length : "?", label: "Findings", note: "Current analysis report", icon: FileText, status: "unverified" },
+    { value: compatibility ? findings.filter(issue => issue.status === "warning").length : "?", label: "Warnings", note: "Review recommended", icon: TriangleAlert, status: "warning" },
+    { value: compatibility ? findings.filter(issue => issue.status === "blocked").length : "?", label: "Blocked", note: "Blocking rule findings", icon: CircleX, status: "blocked" },
+  ] : [
+    { value: data.enabledMods, label: "Enabled", note: "Current deployment", icon: CheckCircle2, status: "ready" },
+    { value: data.installedMods, label: "Installed", note: "Managed mod library", icon: Boxes, status: "unverified" },
+    { value: preflight?.issues.length ?? "?", label: "Findings", note: "Launch preflight", icon: TriangleAlert, status: "warning" },
+  ];
+
+  return <div className="page command-center-page">
+    {!hideLaunchControls && <LaunchControls status={preflight?.status ?? (canLaunch ? "unverified" : "blocked")} canLaunch={canLaunch} launching={launching} onHealth={onHealth ?? onDiagnose} onLaunchGame={onLaunchGame} onLaunchMode={onLaunchMode} onProfiles={onProfiles} />}
+
+    <header className="page-header"><div><h1>Command Center</h1></div></header>
+
+    {!game.detected && <section className="callout warning" role="alert"><div><h2>{game.problemCode === "game_path_invalid" ? "Your saved game location moved" : "Locate your game installation"}</h2><p>{game.problem ?? "Automatic discovery did not find a valid Zero Company installation."}</p>{game.problemCode === "game_path_invalid" && game.path && <small className="stale-path">Saved location: <code>{game.path}</code></small>}</div><button className="primary" onClick={onLocate}>Locate game</button></section>}
     {!!existingModsFound && <section className="callout warning existing-mod-callout"><div><h2>Existing mods found</h2><p>Zero Mod Manager found {existingModsFound} unmanaged mod{existingModsFound === 1 ? "" : "s"} that can be reviewed for migration.</p></div><button onClick={onDismissExisting}>Not now</button><button className="primary" onClick={onReviewExisting}>Review existing mods</button></section>}
     {data.previousBuildId && game.steamBuildId && data.previousBuildId !== game.steamBuildId && <section className="callout warning"><div><h2>Zero Company updated</h2><p>Build {data.previousBuildId} → {game.steamBuildId}. Review installed mods before playing.</p></div><button onClick={onDiagnose}>Review</button></section>}
-    <section className="stats" aria-label="Game and mod status">
-      <article><span>Steam build</span><strong>{game.steamBuildId ?? "—"}</strong><small>{game.source === "manual" ? "Manual location" : "Steam manifest"}</small></article>
-      <article><span>Engine</span><strong>UE 5.6.1</strong><small>Known game engine</small></article>
-      <article><span>Mods installed</span><strong>{data.installedMods}</strong><small>{data.enabledMods} enabled</small></article>
-      <article><span>Conflicts</span><strong className={data.conflictCount ? "warn-text" : ""}>{data.conflictCount}</strong><small>{data.conflictCount ? "Review recommended" : "No overlap detected"}</small></article>
-    </section>
-    <div className="home-grid">
-      <section className="panel action-panel"><div className="panel-heading"><div><p className="eyebrow">QUICK ACTION</p><h2>Install a downloaded mod</h2></div><Download aria-hidden /></div><p>Drop a ZIP, 7z, packaged mod file, or UE4SS Lua folder. The payload is staged and checked before anything reaches the game.</p><button className="primary large" onClick={onInstall}><Download aria-hidden size={18} />Install mod</button><button onClick={onOpenMods}><FolderOpen aria-hidden size={18} />Open mods folder</button></section>
-      <section className="panel runtime"><div className="panel-heading"><h2>Runtime readiness</h2><ShieldCheck aria-hidden /></div>
-        <div className="check-row"><PackageCheck aria-hidden /><div><b>Packaged mods</b><small>{game.detected ? "Deployment path ready" : "Waiting for game path"}</small></div><StatusBadge status={game.detected ? "good" : "unknown"}>{game.detected ? "Ready" : "Unknown"}</StatusBadge></div>
-        <div className="check-row"><Puzzle aria-hidden /><div><b>UE4SS runtime</b><small>{ue4ss.message ?? (ue4ss.installed ? `${ue4ss.modCount} UE4SS mod${ue4ss.modCount === 1 ? "" : "s"} detected` : "Optional runtime not installed")}</small></div><StatusBadge status={loaded ? "good" : ue4ss.installed ? "warning" : "unknown"}>{ue4ss.installed ? loaded ? "Active" : "Attention" : "Not found"}</StatusBadge>
-          <div className="row-links"><button className="link-button" onClick={onGetUe4ss}><ExternalLink aria-hidden size={14} />Get the tested build on Nexus Mods</button><button className="link-button" onClick={onInstallUe4ss} disabled={!game.detected || busy}><FileArchive aria-hidden size={14} />{ue4ss.installed ? "Update from downloaded package\u2026" : "Install from downloaded package\u2026"}</button></div>
+
+    <header className="command-heading">
+      <div className="command-tabs" role="tablist" aria-label="Command Center views">
+        {(["readiness", "operations", "activity"] as CommandView[]).map((tab, index, tabs) => <button key={tab} id={`command-tab-${tab}`} role="tab" aria-controls="command-view" tabIndex={view === tab ? 0 : -1} aria-selected={view === tab} className={view === tab ? "active" : ""} onClick={() => setView(tab)} onKeyDown={event => {
+          const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+          if (next >= 0) { event.preventDefault(); setView(tabs[next]); document.getElementById(`command-tab-${tabs[next]}`)?.focus(); }
+        }}><span>{tab}</span></button>)}
+      </div>
+    </header>
+
+    <div id="command-view" role="tabpanel" aria-labelledby={`command-tab-${view}`}>
+    {view === "readiness" && <>
+      <section className="readiness-layout" aria-label="Deployment readiness">
+        <div className="system-overview">
+          <h2>Systems</h2>
+          <div className="system-list" aria-label="Deployment systems">{systems.map(system => <button key={system.id} className={selectedSystem === system.id ? "selected" : ""} aria-label={`${system.label}: ${system.status}. ${system.metric}`} aria-pressed={selectedSystem === system.id} onClick={() => setSelectedSystem(system.id)}><system.icon aria-hidden size={20} /><span><b>{system.label}</b><small>{system.metric}</small></span><span className={`op-state ${system.status}`}>{statusCopy[system.status]}</span></button>)}</div>
         </div>
-        <div className="check-row"><Activity aria-hidden /><div><b>Container verification</b><small>{data.retoc.version ?? "Configure retoc in Settings"}</small></div><StatusBadge status={data.retoc.found ? "good" : "warning"}>{data.retoc.found ? "Available" : "Setup needed"}</StatusBadge></div>
-        <button className="text-button" onClick={onDiagnose}>Run Mod Doctor →</button>
+
+        <aside className={`system-detail ${activeSystem.status}`} aria-live="polite">
+          <div className="system-detail-heading"><ActiveSystemIcon className="detail-icon" aria-hidden size={43} /><div><h2>{activeSystem.label}</h2><p>{activeSystem.metric}</p></div><span className={`system-state ${activeSystem.status}`}><i aria-hidden="true" />{statusCopy[activeSystem.status]}</span></div>
+          {activeSystem.status !== "ready" && <p className="system-summary">{activeSystem.summary}</p>}
+          <div className="system-stats">{detailStats.map(stat => <div key={stat.label} className={stat.status}><stat.icon aria-hidden size={30} /><strong>{stat.value}</strong><b>{stat.label}</b></div>)}</div>
+          <details className="evidence-details"><summary>Technical details</summary>
+          <div className="system-evidence">{evidenceRows.map(row => <div key={row.title}><FileText aria-hidden size={23} /><span><b>{row.title}</b><small>{row.detail}</small></span>{row.status === "ready" ? <CheckCircle2 className="signal-ready" aria-label="Ready" size={19} /> : row.status === "blocked" ? <CircleX className="signal-blocked" aria-label="Blocked" size={19} /> : row.status === "warning" ? <TriangleAlert className="signal-warning" aria-label="Warning" size={19} /> : <CircleHelp aria-label="Unverified" size={19} />}</div>)}</div>
+          </details>
+          <div className="system-actions"><button className="primary" onClick={activeSystem.action} disabled={!activeSystem.action}><Search aria-hidden size={24} />{activeSystem.actionLabel}<ChevronRight aria-hidden size={20} /></button>{activeSystem.secondaryLabel && <button onClick={activeSystem.secondaryAction} disabled={!activeSystem.secondaryAction || busy || (selectedSystem === "runtime" && !game.detected)}>{activeSystem.secondaryLabel}</button>}</div>
+        </aside>
       </section>
+
+      <section className="command-footer" aria-label="Current deployment summary">
+        <article><h3>Active profile</h3><Layers3 aria-hidden /><span><b>{profile?.name ?? "Default"}</b><em>{profile?.enabledMods ?? data.enabledMods} / {profile?.totalMods ?? data.installedMods} mods enabled</em></span><button onClick={onProfiles} disabled={!onProfiles}>Manage <ChevronRight aria-hidden size={16} /></button></article>
+        <article><h3>Latest snapshot</h3><Boxes aria-hidden /><span><b>{lastSnapshot?.label ?? "No checkpoint"}</b><em>{lastSnapshot ? formatDate(lastSnapshot.createdAt) : "Create a recovery point in Profiles"}</em></span><button onClick={onProfiles} disabled={!onProfiles}>Snapshots <ChevronRight aria-hidden size={16} /></button></article>
+        <article><h3>Recent operation</h3><Activity aria-hidden /><span><b>{lastOperation?.summary ?? "No managed operation"}</b><em>{lastOperation ? `${lastOperation.status} · ${formatDate(lastOperation.startedAt)}` : "Your managed changes will appear here"}</em></span><button onClick={() => setView("activity")}>View log <ChevronRight aria-hidden size={16} /></button></article>
+      </section>
+    </>}
+
+    {view === "operations" && <section className="operations-view">
+      <article className="operation-primary"><div><h2>Install a downloaded mod</h2></div><button className="primary large" onClick={onInstall}><Download aria-hidden size={18} />Install mod</button></article>
+      <div className="operation-grid">
+        <article><Wrench aria-hidden /><div><h3>Runtime & tools</h3><p>{ue4ss.message ?? (runtimeLoaded ? "UE4SS load evidence is available." : "Review runtime readiness before using dependent mods.")}</p></div><button onClick={onDiagnose}>Run Mod Doctor</button><button className="link-button" onClick={onGetUe4ss}><ExternalLink aria-hidden size={14} />Tested UE4SS build</button><button className="link-button" onClick={onInstallUe4ss} disabled={!game.detected || busy}><FileArchive aria-hidden size={14} />Install downloaded package</button></article>
+        <article><SlidersHorizontal aria-hidden /><div><h3>Deployment access</h3></div><button onClick={onLibrary} disabled={!onLibrary}>Open Library</button><button onClick={onOpenMods}><FolderOpen aria-hidden size={16} />Open mods folder</button></article>
+      </div>
+      {preflight?.issues.length ? <div className="preflight-list"><h2>Preflight findings</h2>{preflight.issues.map(issue => <article key={issue.id}><span className={`op-state ${issue.status}`}>{statusCopy[issue.status]}</span><div><b>{issue.title}</b><p>{issue.detail}</p></div></article>)}</div> : <div className="quiet-state"><ShieldCheck aria-hidden />{preflight ? "No preflight finding requires attention." : "Preflight evidence has not been loaded yet."}</div>}
+    </section>}
+
+    {view === "activity" && <section className="activity-view">
+      <div className="section-heading"><div><h2>Managed operation timeline</h2></div><button onClick={onHealth ?? onDiagnose}>Open Health</button></div>
+      {recentActivity.length ? <div className="command-timeline">{recentActivity.slice(0, 10).map(item => <article key={item.id}><span className={`timeline-node ${item.status === "completed" ? "ready" : item.status === "failed" ? "blocked" : "warning"}`} aria-hidden="true" /><div><b>{item.summary}</b><small>{item.kind} · {formatDate(item.startedAt)}</small></div><span className={`op-state ${item.status === "completed" ? "ready" : item.status === "failed" ? "blocked" : "warning"}`}>{item.status}</span></article>)}</div> : <div className="quiet-state"><Activity aria-hidden />No managed operations recorded yet.</div>}
+    </section>}
+
     </div>
-    {game.path && <button className="path-line" onClick={onOpenGame} title="Open game folder"><FolderOpen aria-hidden size={15} /><span>{game.path}</span></button>}
+    <div className="command-paths">
+      <button className="path-line command-path" onClick={onOpenMods}><FolderOpen aria-hidden size={15} /><span>Open mods folder</span></button>
+      {game.path && <button className="path-line command-path" onClick={onOpenGame} title="Open game folder"><Gamepad2 aria-hidden size={15} /><span>{game.path}</span></button>}
+    </div>
   </div>;
 }

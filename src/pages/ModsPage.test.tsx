@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ConflictGroup, LoadOrderEntry, LoadOrderPreview, LoadOrderState, ModSummary, ModUpdate, ModUpdateReport } from "../types";
+import type { ConflictGroup, LoadOrderEntry, LoadOrderPreview, LoadOrderState, ModSummary } from "../types";
 import { dropOrder, ModsPage, moveOrder, winnerFor } from "./ModsPage";
 
 afterEach(cleanup);
@@ -42,14 +42,13 @@ function props(overrides: Partial<Parameters<typeof ModsPage>[0]> = {}): Paramet
     onInstall: vi.fn(), onToggle: vi.fn(), onUninstall: vi.fn(), onReconfigure: vi.fn(), onVerify: vi.fn(), onRename: vi.fn(),
     onOpenInstalled: vi.fn(), onOpenSource: vi.fn(), onBrowseNexus: vi.fn(),
     onPreviewOrder: vi.fn(), onApplyOrder: vi.fn(), onApplyUe4ssOrder: vi.fn(), onCancelOrder: vi.fn(),
-    updates: null, checkingUpdates: false, canCheckUpdates: true, directDownload: false,
-    onCheckUpdates: vi.fn(), onUpdateMod: vi.fn(), onLinkMod: vi.fn(), onSetModChecked: vi.fn(), onOpenModPage: vi.fn(), onSetHidden: vi.fn(),
+    onOpenModPage: vi.fn(), onSetHidden: vi.fn(),
     ...overrides
   };
 }
 
 const installed = (id: string, modType: ModSummary["modType"]): ModSummary => ({
-  id, name: id, version: null, modType, enabled: true, installedAt: "2026-08-30T00:00:00Z",
+  id, bundleId: null, name: id, version: null, modType, enabled: true, installedAt: "2026-08-30T00:00:00Z",
   installedBuild: null, packageCount: 0, conflictCount: 0, potentialConflictCount: 0,
   loadPriority: null, nexusModId: null, nexusUrl: null, nexusIgnored: false, hidden: false, fomod: false, files: []
 });
@@ -228,97 +227,6 @@ describe("UE4SS start passes", () => {
     await userEvent.click(screen.getByRole("button", { name: "Move Harder up" }));
     await userEvent.click(screen.getByRole("button", { name: "Apply start order" }));
     expect(onApplyUe4ssOrder).toHaveBeenCalledWith(["dll", "lua-b", "lua-a"]);
-  });
-});
-
-describe("Nexus mod updates", () => {
-  const update: ModUpdate = {
-    modId: "unlocked", name: "ZCUnlocked", installedVersion: "1.3", installedFileId: 200,
-    nexusModId: 34, latestFileId: 260, latestVersion: "1.4", latestFileName: "ZCUnlocked-1.4.zip",
-    pageUrl: "https://www.nexusmods.com/starwarszerocompany/mods/34?tab=files",
-    nxmUrl: "nxm://starwarszerocompany/mods/34/files/260",
-    checkedAt: "2026-09-01T00:00:00Z"
-  };
-  const report = (overrides: Partial<ModUpdateReport> = {}): ModUpdateReport => ({
-    updates: [update], tracked: 1, identified: 0, unmatched: 0, ignored: 0, checkedAt: "2026-09-01T00:00:00Z", fromCache: true, problem: null, ...overrides
-  });
-  const library = [{ ...installed("unlocked", "iostore"), name: "ZCUnlocked", version: "1.3" }];
-
-  it("marks the mod and offers the update", async () => {
-    const onUpdateMod = vi.fn();
-    render(<ModsPage {...props({ mods: library, updates: report(), onUpdateMod })} />);
-    expect(screen.getByText("1 update available")).toBeDefined();
-    expect(screen.getByText("Update available: 1.4")).toBeDefined();
-    await userEvent.click(screen.getByRole("button", { name: "Open on Nexus" }));
-    expect(onUpdateMod).toHaveBeenCalledWith(update);
-  });
-
-  it("offers a direct download only to a premium account", () => {
-    render(<ModsPage {...props({ mods: library, updates: report(), directDownload: true })} />);
-    expect(screen.getByRole("button", { name: "Download update" })).toBeDefined();
-  });
-
-  it("says nothing when the last check found nothing", () => {
-    render(<ModsPage {...props({ mods: library, updates: report({ updates: [] }) })} />);
-    expect(screen.queryByText(/update available/i)).toBeNull();
-  });
-
-  it("cannot check without a stored API key", async () => {
-    const onCheckUpdates = vi.fn();
-    render(<ModsPage {...props({ mods: library, updates: null, canCheckUpdates: false, onCheckUpdates })} />);
-    const button = screen.getByRole("button", { name: "Check for updates" });
-    expect(button.hasAttribute("disabled")).toBe(true);
-    await userEvent.click(button);
-    expect(onCheckUpdates).not.toHaveBeenCalled();
-  });
-
-  it("checks on demand", async () => {
-    const onCheckUpdates = vi.fn();
-    render(<ModsPage {...props({ mods: library, updates: null, onCheckUpdates })} />);
-    await userEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-    expect(onCheckUpdates).toHaveBeenCalled();
-  });
-});
-
-describe("linking a mod that was not downloaded here", () => {
-  const orphan = installed("adopted", "ue4ss");
-
-  it("offers to link an unmatched mod by its Nexus address", async () => {
-    const onLinkMod = vi.fn();
-    render(<ModsPage {...props({ mods: [orphan], onLinkMod })} />);
-    await userEvent.click(screen.getByRole("button", { name: "More details for adopted" }));
-    const field = screen.getByRole("textbox", { name: "Nexus Mods address for adopted" });
-    await userEvent.type(field, "https://www.nexusmods.com/games/starwarszerocompany/mods/34");
-    await userEvent.click(screen.getByRole("button", { name: "Link" }));
-    expect(onLinkMod).toHaveBeenCalledWith(orphan, "https://www.nexusmods.com/games/starwarszerocompany/mods/34");
-  });
-
-  it("shows the linked mod and offers to stop checking it", async () => {
-    const onSetModChecked = vi.fn();
-    const linked = { ...orphan, nexusModId: 34 };
-    render(<ModsPage {...props({ mods: [linked], onSetModChecked })} />);
-    await userEvent.click(screen.getByRole("button", { name: "More details for adopted" }));
-    expect(screen.getByText("#34")).toBeDefined();
-    await userEvent.click(screen.getByRole("button", { name: "Stop checking this mod" }));
-    expect(onSetModChecked).toHaveBeenCalledWith(linked, false);
-  });
-
-  it("lets a mod that is not on Nexus be left out for good", async () => {
-    const onSetModChecked = vi.fn();
-    render(<ModsPage {...props({ mods: [orphan], onSetModChecked })} />);
-    await userEvent.click(screen.getByRole("button", { name: "More details for adopted" }));
-    await userEvent.click(screen.getByRole("button", { name: "Never check this mod" }));
-    expect(onSetModChecked).toHaveBeenCalledWith(orphan, false);
-  });
-
-  it("offers an excluded mod back, and stops asking for an address", async () => {
-    const onSetModChecked = vi.fn();
-    const excluded = { ...orphan, nexusIgnored: true };
-    render(<ModsPage {...props({ mods: [excluded], onSetModChecked })} />);
-    await userEvent.click(screen.getByRole("button", { name: "More details for adopted" }));
-    expect(screen.queryByRole("textbox", { name: "Nexus Mods address for adopted" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Check this mod again" }));
-    expect(onSetModChecked).toHaveBeenCalledWith(excluded, true);
   });
 });
 

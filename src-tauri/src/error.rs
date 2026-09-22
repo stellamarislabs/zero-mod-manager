@@ -20,7 +20,7 @@ pub enum AppError {
     AlternativeIoStoreVariants(String),
     #[error("IoStore validation failed: {0}")]
     RetocVerificationFailed(String),
-    #[error("retoc 0.1.5 is required to validate IoStore mods. Configure it in Settings.")]
+    #[error("Optional retoc is not available. Container integrity and package overlaps have not been verified.")]
     RetocNotFound,
     #[error("UE4SS is not installed or its layout is incomplete.")]
     Ue4ssNotFound,
@@ -36,20 +36,12 @@ pub enum AppError {
     PreviewExpired,
     #[error("The proposed load order is invalid: {0}")]
     InvalidLoadOrder(String),
+    #[error("Close Star Wars: Zero Company before changing managed files. The current operation was not started.")]
+    GameRunning,
+    #[error("The compatibility catalog could not be trusted: {0}")]
+    CatalogUntrusted(String),
     #[error("This archive needs the 7-Zip command-line tool, and none was found. Install 7-Zip, or point Settings → Archive tool at your own 7z.exe.")]
     SevenZipNotFound,
-    #[error("That is not a usable Nexus Mods link: {0}")]
-    NexusLinkInvalid(String),
-    #[error("That download link is for another game ({0}), so it was ignored.")]
-    NexusLinkForAnotherGame(String),
-    #[error("Nexus Mods rejected the API key. Check it in Settings.")]
-    NexusUnauthorized,
-    #[error("Nexus Mods rate limit reached. Try again later.")]
-    NexusRateLimited,
-    #[error("A Nexus Mods API key is required. Add one in Settings.")]
-    NexusKeyMissing,
-    #[error("Nexus Mods returned no download link. Non-premium downloads must start from the Mod Manager Download button on the website.")]
-    NexusNoDownloadLink,
     #[error("Network request failed: {0}")]
     Network(String),
     #[error("Database error: {0}")]

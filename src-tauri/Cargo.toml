@@ -1,6 +1,6 @@
 [package]
 name = "zero-mod-manager"
-version = "0.7.0"
+version = "0.7.0-rc.1"
 description = "An independent community mod manager for Star Wars: Zero Company"
 authors = ["Zero Mod Manager contributors", "Victor Hugo (arctco)"]
 edition = "2021"
@@ -22,9 +22,6 @@ serde_json = "1"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 sha2 = "0.10"
-# Nexus Mods indexes uploaded files by MD5, which is the only way to identify
-# a mod that was installed before its provenance was recorded.
-md-5 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -32,14 +29,13 @@ walkdir = "2"
 zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd"] }
 dirs = "6"
 regex = "1"
-tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-single-instance = "2.4.3"
-futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
-tokio = { version = "1.53.1", features = ["fs", "io-util"] }
 keyring = "4.1.6"
 roxmltree = "0.21"
 base64 = "0.22"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "json", "stream", "http2", "charset"] }
+ed25519-dalek = "2"
+toml_edit = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

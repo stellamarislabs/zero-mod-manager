@@ -15,6 +15,7 @@ pub fn open(path: &Path) -> Result<Connection> {
       CREATE TABLE IF NOT EXISTS mod_packages(mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE, package_id TEXT NOT NULL, PRIMARY KEY(mod_id, package_id));
       CREATE TABLE IF NOT EXISTS mod_backups(mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE, destination TEXT NOT NULL, backup_relative TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(mod_id, destination));
       CREATE TABLE IF NOT EXISTS fomod_installs(mod_id TEXT PRIMARY KEY REFERENCES mods(id) ON DELETE CASCADE, answers_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS container_checks(mod_id TEXT PRIMARY KEY REFERENCES mods(id) ON DELETE CASCADE, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS nexus_sources(archive_path TEXT PRIMARY KEY, nexus_mod_id INTEGER NOT NULL, nexus_file_id INTEGER NOT NULL, version TEXT, file_name TEXT NOT NULL, downloaded_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS nexus_identification(mod_id TEXT PRIMARY KEY REFERENCES mods(id) ON DELETE CASCADE, md5 TEXT NOT NULL, matched INTEGER NOT NULL, attempted_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS nexus_updates(nexus_mod_id INTEGER PRIMARY KEY, latest_file_id INTEGER NOT NULL, latest_version TEXT, latest_file_name TEXT NOT NULL, checked_at TEXT NOT NULL);
@@ -27,6 +28,9 @@ pub fn open(path: &Path) -> Result<Connection> {
     migrate_v5(&mut connection)?;
     migrate_v6(&mut connection)?;
     migrate_v7(&mut connection)?;
+    migrate_v8(&mut connection)?;
+    migrate_v9(&mut connection)?;
+    migrate_v10(&mut connection)?;
     Ok(connection)
 }
 
@@ -212,33 +216,180 @@ fn migrate_v7(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-/// Turns update checking for one mod off or back on.
-///
-/// Off drops whatever it was linked to, so a mod pointed at the wrong Nexus
-/// page is corrected by turning this off and linking it again. On also forgets
-/// the recorded identification attempt, so the next check offers its archive to
-/// Nexus once more.
-pub fn set_nexus_checked(conn: &Connection, id: &str, checked: bool) -> Result<()> {
-    conn.execute(
-        "UPDATE mods SET nexus_ignored=?2 WHERE id=?1",
-        params![id, !checked],
-    )?;
-    if checked {
-        conn.execute("DELETE FROM nexus_identification WHERE mod_id=?1", [id])?;
-    } else {
-        clear_nexus_ids(conn, id)?;
-    }
-    Ok(())
-}
-
-/// How many mods the user has taken out of checking.
-pub fn ignored_count(conn: &Connection) -> Result<usize> {
-    let count: i64 = conn.query_row(
-        "SELECT count(*) FROM mods WHERE nexus_ignored=1",
+/// Adds the operational state used by profiles, recoverable activity,
+/// launch evidence, configuration patches and compatibility metadata.
+fn migrate_v8(conn: &mut Connection) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=8)",
         [],
         |row| row.get(0),
     )?;
-    Ok(count as usize)
+    if applied {
+        return Ok(());
+    }
+    let transaction = conn.transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS profiles(
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           notes TEXT NOT NULL DEFAULT '',
+           required_runtime TEXT,
+           created_at TEXT NOT NULL,
+           updated_at TEXT NOT NULL,
+           is_active INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS one_active_profile
+           ON profiles(is_active) WHERE is_active=1;
+         CREATE TABLE IF NOT EXISTS profile_mods(
+           profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+           mod_id TEXT NOT NULL REFERENCES mods(id) ON DELETE CASCADE,
+           enabled INTEGER NOT NULL,
+           load_priority INTEGER,
+           fomod_answers TEXT,
+           PRIMARY KEY(profile_id,mod_id)
+         );
+         CREATE TABLE IF NOT EXISTS snapshots(
+           id TEXT PRIMARY KEY,
+           profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+           label TEXT NOT NULL,
+           kind TEXT NOT NULL,
+           payload_json TEXT NOT NULL,
+           created_at TEXT NOT NULL,
+           last_known_good INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS launch_sessions(
+           id TEXT PRIMARY KEY,
+           mode TEXT NOT NULL,
+           profile_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+           launcher TEXT NOT NULL,
+           game_build TEXT,
+           executable_sha256 TEXT,
+           runtime_version TEXT,
+           mod_lock_json TEXT NOT NULL,
+           started_at TEXT NOT NULL,
+           ended_at TEXT,
+           outcome TEXT,
+           log_evidence TEXT
+         );
+         CREATE TABLE IF NOT EXISTS operations(
+           id TEXT PRIMARY KEY,
+           kind TEXT NOT NULL,
+           status TEXT NOT NULL,
+           summary TEXT NOT NULL,
+           detail_json TEXT NOT NULL,
+           recovery_json TEXT,
+           started_at TEXT NOT NULL,
+           finished_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS compatibility_rules(
+           id TEXT PRIMARY KEY,
+           subject_mod_id TEXT NOT NULL,
+           target_mod_id TEXT,
+           rule_type TEXT NOT NULL,
+           severity TEXT NOT NULL,
+           source TEXT NOT NULL,
+           evidence_url TEXT,
+           message TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS config_patches(
+           id TEXT PRIMARY KEY,
+           profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+           path TEXT NOT NULL,
+           format TEXT NOT NULL,
+           patch_json TEXT NOT NULL,
+           backup_path TEXT,
+           created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS isolation_sessions(
+           id TEXT PRIMARY KEY,
+           profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+           original_lock_json TEXT NOT NULL,
+           candidates_json TEXT NOT NULL,
+           observations_json TEXT NOT NULL,
+           current_json TEXT NOT NULL,
+           phase TEXT NOT NULL,
+           status TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );",
+    )?;
+    let profile_count: i64 =
+        transaction.query_row("SELECT count(*) FROM profiles", [], |r| r.get(0))?;
+    if profile_count == 0 {
+        let profile_id = uuid::Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO profiles(id,name,created_at,updated_at,is_active) VALUES(?1,'Default',datetime('now'),datetime('now'),1)",
+            [&profile_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO profile_mods(profile_id,mod_id,enabled,load_priority,fomod_answers)
+             SELECT ?1,m.id,m.enabled,m.load_priority,f.answers_json
+             FROM mods m LEFT JOIN fomod_installs f ON f.mod_id=m.id",
+            [&profile_id],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO schema_migrations(version,applied_at) VALUES(8,datetime('now'))",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Retains stable manifest identity and the exact author contract so catalog
+/// rules never depend on a random local database id.
+fn migrate_v9(conn: &mut Connection) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=9)",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let transaction = conn.transaction()?;
+    if !column_exists(&transaction, "mods", "manifest_id")? {
+        transaction.execute("ALTER TABLE mods ADD COLUMN manifest_id TEXT", [])?;
+    }
+    if !column_exists(&transaction, "mods", "manifest_json")? {
+        transaction.execute("ALTER TABLE mods ADD COLUMN manifest_json TEXT", [])?;
+    }
+    transaction.execute(
+        "CREATE INDEX IF NOT EXISTS mods_manifest_id ON mods(manifest_id)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_migrations(version,applied_at) VALUES(9,datetime('now'))",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Links components that came from one archive and were committed as one
+/// operation. Existing installs remain valid standalone components.
+fn migrate_v10(conn: &mut Connection) -> Result<()> {
+    let applied: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=10)",
+        [],
+        |row| row.get(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let transaction = conn.transaction()?;
+    if !column_exists(&transaction, "mods", "bundle_id")? {
+        transaction.execute("ALTER TABLE mods ADD COLUMN bundle_id TEXT", [])?;
+    }
+    transaction.execute(
+        "CREATE INDEX IF NOT EXISTS mods_bundle_id ON mods(bundle_id)",
+        [],
+    )?;
+    transaction.execute(
+        "INSERT INTO schema_migrations(version,applied_at) VALUES(10,datetime('now'))",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
 }
 
 pub fn set_hidden(conn: &Connection, id: &str, hidden: bool) -> Result<()> {
@@ -246,51 +397,7 @@ pub fn set_hidden(conn: &Connection, id: &str, hidden: bool) -> Result<()> {
     Ok(())
 }
 
-/// A Nexus file that was downloaded to `archive_path`. Installation looks the
-/// path up again to attach the ids to the mod that comes out of it.
-pub fn record_nexus_source(
-    conn: &Connection,
-    archive_path: &str,
-    nexus_mod_id: u64,
-    nexus_file_id: u64,
-    version: Option<&str>,
-    file_name: &str,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO nexus_sources(archive_path,nexus_mod_id,nexus_file_id,version,file_name,downloaded_at) \
-         VALUES(?1,?2,?3,?4,?5,datetime('now')) ON CONFLICT(archive_path) DO UPDATE SET \
-         nexus_mod_id=excluded.nexus_mod_id,nexus_file_id=excluded.nexus_file_id,version=excluded.version,\
-         file_name=excluded.file_name,downloaded_at=excluded.downloaded_at",
-        params![
-            archive_path,
-            nexus_mod_id as i64,
-            nexus_file_id as i64,
-            version,
-            file_name
-        ],
-    )?;
-    Ok(())
-}
-
-/// Attaches the provenance recorded for `archive_path` to an installed mod.
-/// Returns whether anything was known about that archive.
-pub fn link_nexus_source(conn: &Connection, mod_id: &str, archive_path: &str) -> Result<bool> {
-    let found: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT nexus_mod_id,nexus_file_id FROM nexus_sources WHERE archive_path=?1",
-            [archive_path],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((nexus_mod_id, nexus_file_id)) = found else {
-        return Ok(false);
-    };
-    set_nexus_ids(conn, mod_id, nexus_mod_id as u64, nexus_file_id as u64)?;
-    Ok(true)
-}
-
-/// Points an installed mod at a Nexus mod and file. Used by the handoff, by
-/// MD5 identification, and by a link the user makes by hand.
+/// Records manifest provenance for external links and compatibility rules.
 pub fn set_nexus_ids(
     conn: &Connection,
     mod_id: &str,
@@ -304,181 +411,8 @@ pub fn set_nexus_ids(
     Ok(())
 }
 
-/// Forgets the connection between an installed mod and its Nexus page, so it
-/// stops being checked. The stored identification attempt goes too, otherwise
-/// the next check would immediately link it again.
-pub fn clear_nexus_ids(conn: &Connection, mod_id: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE mods SET nexus_mod_id=NULL,nexus_file_id=NULL WHERE id=?1",
-        params![mod_id],
-    )?;
-    conn.execute("DELETE FROM nexus_identification WHERE mod_id=?1", [mod_id])?;
-    Ok(())
-}
-
-/// An installed mod with no Nexus provenance, and the archive it was installed
-/// from if one was recorded. Identification needs that archive to still exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UntrackedInstall {
-    pub id: String,
-    pub name: String,
-    pub version: Option<String>,
-    pub source_archive: Option<String>,
-    /// The MD5 of the archive when it was last looked up, and whether Nexus
-    /// recognised it. Absent when it has never been looked up.
-    pub attempt: Option<(String, bool)>,
-}
-
-pub fn untracked_installs(conn: &Connection) -> Result<Vec<UntrackedInstall>> {
-    let mut statement = conn.prepare(
-        "SELECT m.id,m.name,m.version,m.source_archive,i.md5,i.matched FROM mods m \
-         LEFT JOIN nexus_identification i ON i.mod_id=m.id \
-         WHERE m.nexus_mod_id IS NULL AND m.nexus_ignored=0 ORDER BY m.name COLLATE NOCASE",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            let md5: Option<String> = row.get(4)?;
-            let matched: Option<bool> = row.get(5)?;
-            Ok(UntrackedInstall {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                version: row.get(2)?,
-                source_archive: row.get::<_, Option<String>>(3)?.filter(|p| !p.is_empty()),
-                attempt: md5.zip(matched),
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// Remembers that an archive's MD5 was offered to Nexus, so an unrecognised
-/// one is not looked up again on every automatic check.
-pub fn record_identification(
-    conn: &Connection,
-    mod_id: &str,
-    md5: &str,
-    matched: bool,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO nexus_identification(mod_id,md5,matched,attempted_at) VALUES(?1,?2,?3,?4) \
-         ON CONFLICT(mod_id) DO UPDATE SET md5=excluded.md5,matched=excluded.matched,attempted_at=excluded.attempted_at",
-        params![mod_id, md5, matched, chrono::Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
-/// An installed mod that came from Nexus Mods and can therefore be checked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NexusInstall {
-    pub id: String,
-    pub name: String,
-    pub version: Option<String>,
-    pub nexus_mod_id: u64,
-    pub nexus_file_id: u64,
-}
-
-pub fn nexus_installs(conn: &Connection) -> Result<Vec<NexusInstall>> {
-    let mut statement = conn.prepare(
-        "SELECT id,name,version,nexus_mod_id,nexus_file_id FROM mods \
-         WHERE nexus_mod_id IS NOT NULL AND nexus_file_id IS NOT NULL AND nexus_ignored=0 \
-         ORDER BY name COLLATE NOCASE",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(NexusInstall {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                version: row.get(2)?,
-                nexus_mod_id: row.get::<_, i64>(3)? as u64,
-                nexus_file_id: row.get::<_, i64>(4)? as u64,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// The newest file Nexus offered in one installed file's variant when it was
-/// last checked, so the interface can show what it knows without going back to
-/// the network.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NexusLatest {
-    pub latest_file_id: u64,
-    pub latest_version: Option<String>,
-    pub latest_file_name: String,
-    pub checked_at: String,
-}
-
-pub fn record_nexus_latest(
-    conn: &Connection,
-    nexus_mod_id: u64,
-    installed_file_id: u64,
-    latest: &NexusLatest,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO nexus_file_updates(nexus_mod_id,installed_file_id,latest_file_id,latest_version,latest_file_name,checked_at) \
-         VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(nexus_mod_id,installed_file_id) DO UPDATE SET \
-         latest_file_id=excluded.latest_file_id,latest_version=excluded.latest_version,\
-         latest_file_name=excluded.latest_file_name,checked_at=excluded.checked_at",
-        params![
-            nexus_mod_id as i64,
-            installed_file_id as i64,
-            latest.latest_file_id as i64,
-            latest.latest_version,
-            latest.latest_file_name,
-            latest.checked_at
-        ],
-    )?;
-    Ok(())
-}
-
-/// Clears every cached variant for a Nexus page before replacing the results
-/// from a successful fresh file-list request.
-pub fn clear_nexus_latest(conn: &Connection, nexus_mod_id: u64) -> Result<()> {
-    conn.execute(
-        "DELETE FROM nexus_file_updates WHERE nexus_mod_id=?1",
-        [nexus_mod_id as i64],
-    )?;
-    Ok(())
-}
-
-pub fn clear_nexus_latest_for_file(
-    conn: &Connection,
-    nexus_mod_id: u64,
-    installed_file_id: u64,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM nexus_file_updates WHERE nexus_mod_id=?1 AND installed_file_id=?2",
-        params![nexus_mod_id as i64, installed_file_id as i64],
-    )?;
-    Ok(())
-}
-
-pub fn nexus_latest(conn: &Connection) -> Result<BTreeMap<(u64, u64), NexusLatest>> {
-    let mut statement = conn.prepare(
-        "SELECT nexus_mod_id,installed_file_id,latest_file_id,latest_version,latest_file_name,checked_at FROM nexus_file_updates",
-    )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                (row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64),
-                NexusLatest {
-                    latest_file_id: row.get::<_, i64>(2)? as u64,
-                    latest_version: row.get(3)?,
-                    latest_file_name: row.get(4)?,
-                    checked_at: row.get(5)?,
-                },
-            ))
-        })?
-        .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
-    Ok(rows)
-}
-
 pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
-            r.get(0)
-        })
-        .optional()?)
+    Ok(conn.query_row("SELECT value FROM settings WHERE key=?1", [key], |r| r.get(0)).optional()?)
 }
 
 pub fn settings(conn: &Connection) -> Result<AppSettings> {
@@ -492,7 +426,6 @@ pub fn settings(conn: &Connection) -> Result<AppSettings> {
         log_level: get_setting(conn, "log_level")?.unwrap_or_else(|| "normal".into()),
         advanced_package_names: bool_value("advanced_package_names")?,
         reduced_motion: bool_value("reduced_motion")?,
-        nexus_auto_update_check: bool_value("nexus_auto_update_check")?,
     })
 }
 
@@ -514,10 +447,6 @@ pub fn save_settings(conn: &Connection, value: &AppSettings) -> Result<()> {
             value.advanced_package_names.to_string(),
         ),
         ("reduced_motion", value.reduced_motion.to_string()),
-        (
-            "nexus_auto_update_check",
-            value.nexus_auto_update_check.to_string(),
-        ),
     ];
     for (key, val) in values {
         conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,val])?;
@@ -544,7 +473,7 @@ pub fn counts(conn: &Connection) -> Result<(usize, usize)> {
 }
 
 pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
-    let mut stmt = conn.prepare("SELECT id,name,version,mod_type,enabled,installed_at,installed_build,load_priority,nexus_mod_id,hidden,nexus_ignored,EXISTS(SELECT 1 FROM fomod_installs f WHERE f.mod_id=mods.id) FROM mods ORDER BY installed_at DESC")?;
+    let mut stmt = conn.prepare("SELECT id,name,version,mod_type,enabled,installed_at,installed_build,load_priority,nexus_mod_id,hidden,nexus_ignored,EXISTS(SELECT 1 FROM fomod_installs f WHERE f.mod_id=mods.id),bundle_id FROM mods ORDER BY installed_at DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -559,6 +488,7 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             r.get::<_, bool>(9)?,
             r.get::<_, bool>(10)?,
             r.get::<_, bool>(11)?,
+            r.get::<_, Option<String>>(12)?,
         ))
     })?;
     let mut result = Vec::new();
@@ -576,6 +506,7 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             hidden,
             nexus_ignored,
             fomod,
+            bundle_id,
         ) = row?;
         let mut fs = conn.prepare(
             "SELECT destination,size,sha256 FROM mod_files WHERE mod_id=?1 ORDER BY destination",
@@ -607,7 +538,9 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             0
         };
         result.push(ModSummary {
+            container_verification: conn.query_row("SELECT state FROM container_checks WHERE mod_id=?1", [&id], |row| row.get(0)).optional()?,
             id,
+            bundle_id,
             name,
             version,
             mod_type,
@@ -619,7 +552,7 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
             potential_conflict_count: potential_conflict_count as usize,
             load_priority,
             nexus_mod_id: nexus_mod_id.map(|id| id as u64),
-            nexus_url: nexus_mod_id.map(|id| crate::nexus::mod_url(id as u64)),
+            nexus_url: nexus_mod_id.map(|id| format!("https://www.nexusmods.com/starwarszerocompany/mods/{id}")),
             nexus_ignored,
             hidden,
             fomod,
@@ -627,6 +560,14 @@ pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
         });
     }
     Ok(result)
+}
+
+pub fn set_bundle_id(conn: &Connection, mod_id: &str, bundle_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE mods SET bundle_id=?2 WHERE id=?1",
+        params![mod_id, bundle_id],
+    )?;
+    Ok(())
 }
 
 pub fn record_fomod_install(tx: &Transaction<'_>, mod_id: &str, answers_json: &str) -> Result<()> {
@@ -657,6 +598,9 @@ pub fn insert_mod(
     packages: &[String],
 ) -> Result<()> {
     tx.execute("INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,installed_build,load_priority) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![summary.id,summary.name,summary.version,summary.mod_type,deployment_key,source,summary.installed_at,summary.enabled,summary.installed_build,summary.load_priority])?;
+    if let Some(state) = &summary.container_verification {
+        tx.execute("INSERT INTO container_checks(mod_id,state) VALUES(?1,?2)", params![summary.id, state])?;
+    }
     for (library, destination, size, hash) in file_rows {
         tx.execute("INSERT INTO mod_files(mod_id,library_relative,destination,size,sha256) VALUES(?1,?2,?3,?4,?5)",params![summary.id,library,destination,*size as i64,hash])?;
     }
@@ -930,7 +874,9 @@ mod tests {
 
     fn summary(id: &str) -> ModSummary {
         ModSummary {
+            container_verification: None,
             id: id.into(),
+            bundle_id: None,
             name: id.into(),
             version: None,
             mod_type: "iostore".into(),
@@ -967,6 +913,24 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn unverified_container_state_survives_restart_and_is_removed_with_mod() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let mut conn = open(&path).unwrap();
+        let mut item = summary("unchecked");
+        item.container_verification = Some("unavailable".into());
+        let tx = conn.transaction().unwrap();
+        insert_mod(&tx, &item, "", None, &[], &[]).unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+        let conn = open(&path).unwrap();
+        assert_eq!(list_mods(&conn).unwrap()[0].container_verification.as_deref(), Some("unavailable"));
+        conn.execute("DELETE FROM mods WHERE id='unchecked'", []).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM container_checks", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

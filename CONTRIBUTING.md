@@ -1,12 +1,12 @@
-# Contributing to ZCOM Mod Manager
+# Contributing to Zero Mod Manager
 
 Thank you for helping build a safe community modding foundation.
 
 ## Development setup
 
 Install Node.js 22+, stable Rust, Tauri 2 platform prerequisites, and 7z. Run
-`npm ci`, `npm run prepare:retoc`, and `npm run tauri dev`. On Windows use
-`scripts/prepare-retoc.ps1` from PowerShell.
+`npm ci` and `npm run tauri dev`. retoc is optional; select a trusted existing
+executable in Settings to enable container verification. No tool is silently bundled.
 
 ## Architecture
 
@@ -64,8 +64,8 @@ checksum mismatch, and unknown-file tests.
 
 ## Reporting game-update incompatibility
 
-Open an issue with the Steam build ID, ZCOM Mod Manager version, mod type, and a
-sanitized Mod Doctor report. Do not attach copyrighted game assets, raw package
+Open an issue with the Steam build ID, Zero Mod Manager version, mod type, and a
+previewed and sanitized support bundle. Do not attach copyrighted game assets, raw package
 lists, home-directory paths, save files, or Steam credentials. State whether
 the issue reproduces with all mods disabled.
 

@@ -77,7 +77,12 @@ export function AdoptionDialog({ scan, busy, onClose, onAdopt }: Props) {
   }));
 
   async function adopt() {
-    const report = await onAdopt(selected.map(({ candidateIds, name }) => ({ candidateIds, name })));
+    const unverified = selected.filter(group => group.candidateIds.some(id => byId.get(id)?.containerVerification === "unavailable"));
+    if (unverified.length && !window.confirm(`Adopt without container verification?\n\n${unverified.map(group => group.name).join("\n")}\n\nContainer integrity and package conflicts are unchecked. Existing game files will stay in place.`)) return;
+    const report = await onAdopt(selected.map(({ candidateIds, name }) => ({
+      candidateIds, name,
+      ...(candidateIds.some(id => byId.get(id)?.containerVerification === "unavailable") ? { allowUnverified: true } : {})
+    })));
     const failures = report.outcomes.filter(outcome => outcome.error);
     setErrors(new Map(failures.flatMap(outcome => outcome.candidateIds.map(id => [id, outcome.error!] as const))));
     if (failures.length === 0) {

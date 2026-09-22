@@ -24,7 +24,7 @@ impl Default for GameInfo {
             path: None,
             steam_build_id: None,
             install_state: None,
-            engine: "UE 5.6.1".into(),
+            engine: "Unreal Engine 5 (minor version unverified)".into(),
             compat_data_path: None,
             source: "none".into(),
             problem_code: None,
@@ -88,6 +88,7 @@ pub struct Dashboard {
     pub ue4ss: Ue4ssInfo,
     pub previous_build_id: Option<String>,
     pub data_directory: String,
+    pub storage_mode: String,
     pub retoc: ToolInfo,
     /// Whether the one-time existing-mod discovery has not yet been shown.
     pub existing_mod_scan_pending: bool,
@@ -105,7 +106,12 @@ pub struct ModFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModSummary {
+    #[serde(default)]
+    pub container_verification: Option<String>,
     pub id: String,
+    /// Components installed from one archive in a single atomic operation
+    /// share this stable local identity.
+    pub bundle_id: Option<String>,
     pub name: String,
     pub version: Option<String>,
     pub mod_type: String,
@@ -223,6 +229,46 @@ pub struct ModManifest {
     pub game: Option<ManifestGame>,
     #[serde(rename = "type", default)]
     pub mod_types: Vec<String>,
+    #[serde(default)]
+    pub nexus: Option<ManifestNexus>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub launchers: Vec<String>,
+    #[serde(default)]
+    pub runtime: Option<ManifestRuntime>,
+    #[serde(default)]
+    pub dependencies: Vec<ManifestRelation>,
+    #[serde(default)]
+    pub incompatibilities: Vec<ManifestRelation>,
+    #[serde(default)]
+    pub load_after: Vec<ManifestRelation>,
+    #[serde(default)]
+    pub config_schema: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestNexus {
+    pub mod_id: Option<u64>,
+    pub file_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestRuntime {
+    pub name: String,
+    pub version: Option<String>,
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestRelation {
+    pub id: String,
+    pub version: Option<String>,
+    pub reason: Option<String>,
+    pub evidence_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +296,8 @@ pub struct StagedMod {
     pub version: Option<String>,
     pub author: Option<String>,
     pub description: Option<String>,
+    /// The author-supplied v1/v2 contract retained as compatibility provenance.
+    pub manifest: Option<ModManifest>,
     pub mod_type: String,
     /// UE4SS mod folder names this payload owns. An archive regularly ships
     /// several, and every one needs its own line in `mods.txt`.
@@ -322,11 +370,41 @@ pub struct ModPreview {
 pub struct Inspection {
     pub previews: Vec<ModPreview>,
     pub installer: Option<crate::fomod::Session>,
+    pub package: PackageAssessment,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageAssessment {
+    /// modBundle, runtime, externalTool, externalInstaller, or unknown.
+    pub role: String,
+    pub title: String,
+    pub reason: String,
+    /// Native or script payloads are names only. Nothing here is executed.
+    pub native_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleInstallItem {
+    #[serde(default)]
+    pub allow_unverified: bool,
+    pub staging_id: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleInstallReport {
+    pub bundle_id: String,
+    pub components: Vec<ModSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExistingModCandidate {
+    #[serde(default)]
+    pub container_verification: Option<String>,
     pub id: String,
     pub name: String,
     pub version: Option<String>,
@@ -355,6 +433,8 @@ pub struct ExistingModScan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdoptionGroup {
+    #[serde(default)]
+    pub allow_unverified: bool,
     pub candidate_ids: Vec<String>,
     pub name: String,
 }
@@ -403,9 +483,6 @@ pub struct AppSettings {
     pub log_level: String,
     pub advanced_package_names: bool,
     pub reduced_motion: bool,
-    /// Whether one throttled update check may run on start-up. Off by default:
-    /// the manager reaches Nexus only when the user has asked it to.
-    pub nexus_auto_update_check: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -428,55 +505,256 @@ impl Default for AppSettings {
             log_level: "normal".into(),
             advanced_package_names: false,
             reduced_motion: false,
-            nexus_auto_update_check: false,
         }
     }
-}
-
-/// An installed mod that Nexus Mods now offers a newer file for.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ModUpdate {
-    /// The installed mod, not the Nexus mod.
-    pub mod_id: String,
-    pub name: String,
-    pub installed_version: Option<String>,
-    pub installed_file_id: u64,
-    pub nexus_mod_id: u64,
-    pub latest_file_id: u64,
-    pub latest_version: Option<String>,
-    pub latest_file_name: String,
-    /// The mod's files tab, where the download has to start for a free account.
-    pub page_url: String,
-    /// The link the website would hand over. A premium key can resolve it
-    /// without the website, so the interface offers that as a direct download.
-    pub nxm_url: String,
-    pub checked_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ModUpdateReport {
-    pub updates: Vec<ModUpdate>,
-    /// Installed mods that carry Nexus provenance and can be checked at all.
-    pub tracked: usize,
-    /// When the newest of the stored results was taken, if anything is stored.
-    pub checked_at: Option<String>,
-    /// True when nothing was fetched and the report is the stored result.
-    pub from_cache: bool,
-    /// Mods matched to a Nexus page by their archive during this check.
-    pub identified: usize,
-    /// Installed mods that could not be matched, and so are not checked. Either
-    /// they did not come from Nexus or the archive they came from is gone.
-    pub unmatched: usize,
-    /// Mods the user has taken out of checking, which are never looked up.
-    pub ignored: usize,
-    /// Why the check was incomplete, when it was.
-    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchReport {
     pub method: String,
+    pub session_id: Option<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileModState {
+    pub mod_id: String,
+    pub name: String,
+    pub mod_type: String,
+    pub enabled: bool,
+    pub load_priority: Option<i64>,
+    pub fomod_answers: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub notes: String,
+    pub required_runtime: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub active: bool,
+    pub enabled_mods: usize,
+    pub total_mods: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDetail {
+    #[serde(flatten)]
+    pub summary: ProfileSummary,
+    pub mods: Vec<ProfileModState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileChange {
+    pub mod_id: String,
+    pub name: String,
+    pub from_enabled: bool,
+    pub to_enabled: bool,
+    pub from_priority: Option<i64>,
+    pub to_priority: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSwitchPreview {
+    pub profile_id: String,
+    pub profile_name: String,
+    pub changes: Vec<ProfileChange>,
+    pub blocked: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileLock {
+    pub schema_version: u32,
+    pub profile_name: String,
+    pub notes: String,
+    pub required_runtime: Option<String>,
+    pub exported_at: String,
+    pub game_build: Option<String>,
+    pub mods: Vec<ProfileLockMod>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileLockMod {
+    pub id: String,
+    /// Local grouping identity for components installed by one atomic bundle
+    /// operation. Optional so older Profile Lock v1 files stay valid.
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    pub name: String,
+    pub version: Option<String>,
+    pub mod_type: String,
+    pub enabled: bool,
+    pub load_priority: Option<i64>,
+    pub nexus_mod_id: Option<u64>,
+    pub nexus_file_id: Option<u64>,
+    pub file_hashes: Vec<String>,
+    pub fomod_answers: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotSummary {
+    pub id: String,
+    pub profile_id: Option<String>,
+    pub label: String,
+    pub kind: String,
+    pub created_at: String,
+    pub last_known_good: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationRecord {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub summary: String,
+    pub detail: serde_json::Value,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessIssue {
+    pub id: String,
+    pub status: String,
+    pub title: String,
+    pub detail: String,
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchPreflight {
+    pub status: String,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub launcher: String,
+    pub game_build: Option<String>,
+    pub runtime_state: String,
+    pub enabled_mods: usize,
+    pub issues: Vec<ReadinessIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LaunchSession {
+    pub id: String,
+    pub mode: String,
+    pub profile_id: Option<String>,
+    pub launcher: String,
+    pub game_build: Option<String>,
+    pub executable_sha256: Option<String>,
+    pub runtime_version: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub outcome: Option<String>,
+    pub log_evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationObservation {
+    pub phase: String,
+    pub enabled_mod_ids: Vec<String>,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IsolationSession {
+    pub id: String,
+    pub profile_id: String,
+    pub phase: String,
+    pub status: String,
+    pub candidate_groups: Vec<Vec<String>>,
+    pub current_mod_ids: Vec<String>,
+    pub observations: Vec<IsolationObservation>,
+    pub suspected_mod_ids: Vec<String>,
+    pub instruction: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibilityIssue {
+    pub id: String,
+    pub status: String,
+    pub rule_type: String,
+    pub title: String,
+    pub detail: String,
+    pub source: String,
+    pub evidence_url: Option<String>,
+    pub member_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompatibilityReport {
+    pub status: String,
+    pub generated_at: String,
+    pub catalog_state: String,
+    pub issues: Vec<CompatibilityIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDocument {
+    pub path: String,
+    pub format: String,
+    pub content: String,
+    pub sha256: String,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigChangePreview {
+    pub path: String,
+    pub format: String,
+    pub before_sha256: String,
+    pub after_sha256: String,
+    pub diff: Vec<String>,
+    pub valid: bool,
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundlePreview {
+    pub sections: Vec<String>,
+    pub redactions: Vec<String>,
+    pub estimated_files: usize,
+    pub includes_save_data: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundleReport {
+    pub path: String,
+    pub files: usize,
+    pub redactions_applied: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPatchRecord {
+    pub id: String,
+    pub profile_id: String,
+    pub path: String,
+    pub format: String,
+    pub backup_path: Option<String>,
+    pub created_at: String,
 }

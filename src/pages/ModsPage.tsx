@@ -1,8 +1,8 @@
-import { ArrowDown, ArrowUp, Download, Eye, EyeOff, ExternalLink, FolderInput, FolderOpen, GripVertical, MoreHorizontal, Package, Pencil, RefreshCw, Settings2, ShieldCheck, Trash2, Trophy, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Eye, EyeOff, ExternalLink, FolderInput, FolderOpen, GripVertical, MoreHorizontal, Package, Pencil, Settings2, ShieldCheck, Trash2, Trophy, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge } from "../components/StatusBadge";
-import type { ConflictGroup, LoadOrderEntry, LoadOrderPreview, LoadOrderState, ModSummary, ModUpdate, ModUpdateReport } from "../types";
+import type { ConflictGroup, LoadOrderEntry, LoadOrderPreview, LoadOrderState, ModSummary } from "../types";
 import { formatDate } from "../utils/format";
 
 interface Props {
@@ -17,19 +17,6 @@ interface Props {
   onApplyUe4ssOrder: (ids: string[]) => void; onCancelOrder: () => void;
   onDiscover?: () => void;
   discovering?: boolean;
-  /** What the last Nexus check found, or null before one has been read. */
-  updates: ModUpdateReport | null;
-  checkingUpdates: boolean;
-  /** A check needs a stored API key, so the button says why when there is none. */
-  canCheckUpdates: boolean;
-  /** A premium key can fetch the file here; a free one has to use the website. */
-  directDownload: boolean;
-  onCheckUpdates: () => void;
-  onUpdateMod: (update: ModUpdate) => void;
-  /** Points a mod at a Nexus mod page the user names. */
-  onLinkMod: (mod: ModSummary, reference: string) => void;
-  /** Takes a mod out of update checking, or puts it back. */
-  onSetModChecked: (mod: ModSummary, checked: boolean) => void;
   /** Opens the Nexus page of a mod that is linked to one. */
   onOpenModPage: (mod: ModSummary) => void;
   /** Keeps a mod out of this list without uninstalling it. */
@@ -76,9 +63,8 @@ export function winnerFor(group: ConflictGroup, order: string[], entries: LoadOr
   return order.find(id => enabled.has(id) && group.memberIds.includes(id)) ?? null;
 }
 
-export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onInstall, onToggle, onUninstall, onReconfigure, onVerify, onRename, onOpenInstalled, onOpenSource, onBrowseNexus, onPreviewOrder, onApplyOrder, onApplyUe4ssOrder, onCancelOrder, onDiscover, discovering, updates, checkingUpdates, canCheckUpdates, directDownload, onCheckUpdates, onUpdateMod, onLinkMod, onSetModChecked, onOpenModPage, onSetHidden }: Props) {
+export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onInstall, onToggle, onUninstall, onReconfigure, onVerify, onRename, onOpenInstalled, onOpenSource, onBrowseNexus, onPreviewOrder, onApplyOrder, onApplyUe4ssOrder, onCancelOrder, onDiscover, discovering, onOpenModPage, onSetHidden }: Props) {
   const [selected, setSelected] = useState<ModSummary | null>(null);
-  const [reference, setReference] = useState("");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [tab, setTab] = useState<ModsTab>("library");
@@ -119,7 +105,6 @@ export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onIns
   // The selection is a snapshot, so linking a mod would leave the open panel
   // describing the state it had before. Read it back from the live list.
   const detail = useMemo(() => selected && (mods.find(mod => mod.id === selected.id) ?? selected), [mods, selected]);
-  const updateFor = useMemo(() => new Map((updates?.updates ?? []).map(update => [update.modId, update])), [updates]);
   const conflicts = useMemo(() => [...new Map([...loadOrder.activeConflicts, ...loadOrder.potentialConflicts].map(group => [group.id, group])).values()], [loadOrder.activeConflicts, loadOrder.potentialConflicts]);
   const visible = useMemo(() => mods.filter(mod => matches(mod, query, filter)), [mods, query, filter]);
   const hiddenCount = useMemo(() => mods.filter(mod => mod.hidden).length, [mods]);
@@ -137,32 +122,19 @@ export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onIns
     window.requestAnimationFrame(() => document.getElementById(`mods-${next}-tab`)?.focus());
   }
 
-  const available = updates?.updates ?? [];
-  const updatePanel = available.length === 0 ? null : <section className="panel update-panel" aria-label="Available mod updates">
-    <h2>{available.length} update{available.length === 1 ? "" : "s"} available</h2>
-    <p className="muted">{directDownload
-      ? "Your Nexus Mods account is premium, so the file can be fetched here. It is inspected and installed over the existing mod exactly like a download started on the website."
-      : "A free Nexus Mods account can only start a download from the website. Opening the mod takes you to its files tab; pressing Mod Manager Download there hands the file back to this application."}</p>
-    {available.map(update => <article key={update.modId}>
-      <div><b>{update.name}</b><small>{update.installedVersion ? `Installed ${update.installedVersion}` : "Installed version unknown"} → {update.latestVersion ? `version ${update.latestVersion}` : update.latestFileName}</small></div>
-      <button className="primary" onClick={() => onUpdateMod(update)}>{directDownload ? <><Download aria-hidden size={16} />Download update</> : <><ExternalLink aria-hidden size={16} />Open on Nexus</>}</button>
-    </article>)}
-  </section>;
-
   const library = mods.length === 0 ? <EmptyState title="Your mod library is empty" body="Install a downloaded archive or mod folder to get started." action={<><button className="primary" onClick={onInstall}>Choose a mod</button><button onClick={onBrowseNexus}><ExternalLink aria-hidden size={17} />Browse on Nexus Mods</button></>} /> : <>
-    {updatePanel}
     <div className="list-toolbar">
       <input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search by name, version, type, or file" aria-label="Search installed mods" />
       <select value={filter} onChange={event => setFilter(event.target.value as Filter)} aria-label="Filter installed mods">{filters.map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
       <span className="result-count">{visible.length} of {mods.length} shown{hiddenCount > 0 && filter !== "hidden" ? ` · ${hiddenCount} hidden` : ""}</span>
     </div>
-    {visible.length === 0 ? <EmptyState title={filter === "hidden" ? "Nothing is hidden" : "No mods match this view"} body={filter === "hidden" ? "Hiding a mod keeps it installed, deployed, and ordered — it only leaves this list. Use it for the runtime's own bundled mods." : "Clear the search box or choose a different filter to see the rest of your library."} action={<button onClick={() => { setQuery(""); setFilter("all"); }}>Reset filters</button>} /> : <section className="mod-list" aria-label="Installed mods">
+    {visible.length === 0 ? <EmptyState title={filter === "hidden" ? "Nothing is hidden" : "No mods match this view"} body={filter === "hidden" ? "Hidden mods remain installed and enabled." : "Clear the search box or choose a different filter to see the rest of your library."} action={<button onClick={() => { setQuery(""); setFilter("all"); }}>Reset filters</button>} /> : <section className="mod-list" aria-label="Installed mods">
       <div className="mod-list-head"><span>Status</span><span>Mod</span><span>Type</span><span>Health</span><span>Installed</span><span>Actions</span></div>
       {visible.map(mod => <article className="mod-row" key={mod.id}>
         <label className="switch"><input type="checkbox" checked={mod.enabled} disabled={busy === mod.id} onChange={() => onToggle(mod)} /><span /><em>{mod.enabled ? "Enabled" : "Disabled"}</em></label>
-        <div className="mod-name"><span className="mod-icon"><Package aria-hidden size={19} /></span><div><b>{mod.name}</b><small>{mod.version ? `Version ${mod.version}` : `${mod.files.length} managed file${mod.files.length === 1 ? "" : "s"}`}</small>{updateFor.get(mod.id) && <small className="update-note">Update available{updateFor.get(mod.id)?.latestVersion ? `: ${updateFor.get(mod.id)?.latestVersion}` : ""}</small>}</div></div>
+        <div className="mod-name"><span className="mod-icon"><Package aria-hidden size={19} /></span><div><b>{mod.name}</b><small>{mod.version ? `Version ${mod.version}` : `${mod.files.length} managed file${mod.files.length === 1 ? "" : "s"}`}</small></div></div>
         <span className="type-chip">{mod.modType === "ue4ss" ? "UE4SS" : mod.modType === "iostore" ? "IoStore" : mod.modType === "gamedir" ? "Game folder" : mod.modType === "plugin" ? "Plugin" : mod.modType === "config" ? "Config" : "PAK"}</span>
-        <StatusBadge status={mod.conflictCount ? "warning" : "good"}>{mod.conflictCount ? `${mod.conflictCount} active` : mod.potentialConflictCount ? `${mod.potentialConflictCount} potential` : "Healthy"}</StatusBadge>
+        <StatusBadge status={mod.conflictCount || mod.containerVerification === "unavailable" ? "warning" : "good"}>{mod.conflictCount ? `${mod.conflictCount} active` : mod.containerVerification === "unavailable" ? "Unverified" : mod.potentialConflictCount ? `${mod.potentialConflictCount} potential` : "No known conflicts"}</StatusBadge>
         <span className="date">{formatDate(mod.installedAt)}</span>
         <div className="row-actions"><button title="Rename" aria-label={`Rename ${mod.name}`} onClick={() => onRename(mod)}><Pencil size={17} /></button>{mod.fomod && <button title="Reconfigure FOMOD" aria-label={`Reconfigure ${mod.name}`} disabled={busy === mod.id} onClick={() => onReconfigure(mod)}><Settings2 size={17} /></button>}<button title="Verify files" aria-label={`Verify ${mod.name}`} onClick={() => onVerify(mod)}><ShieldCheck size={17} /></button><button title="Open installed files" aria-label={`Open ${mod.name} files`} onClick={() => onOpenInstalled(mod)}><FolderOpen size={17} /></button><button title="Open managed source" aria-label={`Open ${mod.name} managed source`} onClick={() => onOpenSource(mod)}><FolderInput size={17} /></button><button title={mod.hidden ? "Show in this list" : "Hide from this list"} aria-label={mod.hidden ? `Show ${mod.name}` : `Hide ${mod.name}`} onClick={() => onSetHidden(mod, !mod.hidden)}>{mod.hidden ? <Eye size={17} /> : <EyeOff size={17} />}</button><button className="danger-icon" title="Uninstall" aria-label={`Uninstall ${mod.name}`} onClick={() => onUninstall(mod)}><Trash2 size={17} /></button><button title="More details" aria-label={`More details for ${mod.name}`} onClick={() => setSelected(mod)}><MoreHorizontal size={17} /></button>{mod.nexusUrl && <button title="Open on Nexus Mods" aria-label={`Open ${mod.name} on Nexus Mods`} onClick={() => onOpenModPage(mod)}><ExternalLink size={17} /></button>}</div>
       </article>)}
@@ -192,7 +164,7 @@ export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onIns
   </div>;
 
   const ue4ssOrder = loadOrder.ue4ssEntries.length === 0 ? null : <section className="ue4ss-order" aria-label="UE4SS start order">
-    <div className="order-explainer"><div><h2>UE4SS start order</h2><p>UE4SS reads <code>mods.txt</code> from the top down, but in two passes: every DLL mod starts first, then every Lua mod once the scripting runtime is ready. Order is therefore set within each pass, not across them.</p></div><span>{loadOrder.ue4ssEntries.length} mod{loadOrder.ue4ssEntries.length === 1 ? "" : "s"}</span></div>
+    <div className="order-explainer"><div><h2>UE4SS start order</h2><p>DLL mods load before Lua mods. Reorder within each group.</p></div><span>{loadOrder.ue4ssEntries.length} mod{loadOrder.ue4ssEntries.length === 1 ? "" : "s"}</span></div>
     {passList("Starts first — DLL mods", "Native mods, started as UE4SS initializes.", nativeIds)}
     {passList("Starts second — Lua mods", "Script mods, started once the Lua runtime exists.", scriptIds)}
     {ue4ssDirty && <div className="order-changebar" role="status"><div><b>UE4SS start order changed</b><span>This rewrites the managed entries in mods.txt. Runtime entries and comments keep their place.</span></div><button onClick={() => setUe4ssDraft(ue4ssIds)} disabled={orderBusy}>Discard</button><button className="primary" onClick={() => onApplyUe4ssOrder(ue4ssOrderIds)} disabled={orderBusy}>{orderBusy ? "Writing…" : "Apply start order"}</button></div>}
@@ -216,30 +188,18 @@ export function ModsPage({ mods, loadOrder, orderPreview, busy, orderBusy, onIns
       {(dirty || loadOrder.unapplied) && <div className="order-changebar" role="status"><div><b>{dirty ? "Load order changed" : "Deployment names need normalization"}</b><span>Review the exact filenames before applying.</span></div><button onClick={() => { setDraftIds(canonicalIds); onCancelOrder(); }} disabled={orderBusy}>Discard</button><button className="primary" onClick={() => onPreviewOrder(orderIds)} disabled={orderBusy}>Review changes</button></div>}
       </>}
       {ue4ssOrder}
-      {orderPreview && <section className="order-review panel" aria-label="Load order review"><h2>Review deployment changes</h2><p>Close Zero Company before applying. The manager will checksum every current file and roll back if any rename or database update fails.</p><div className="review-stats"><b>{orderPreview.moves.length}</b><span>file rename{orderPreview.moves.length === 1 ? "" : "s"}</span><b>{orderPreview.winnerChanges.length}</b><span>winner change{orderPreview.winnerChanges.length === 1 ? "" : "s"}</span></div>{orderPreview.moves.length > 0 && <ul className="move-list">{orderPreview.moves.map((move, index) => <li key={`${move.modId}-${index}`}><span>{move.from}</span><b>→</b><span>{move.to}</span></li>)}</ul>}<footer className="dialog-actions"><button onClick={onCancelOrder} disabled={orderBusy}>Back</button><button className="primary" onClick={() => onApplyOrder(orderPreview.orderedModIds)} disabled={orderBusy}>{orderBusy ? "Applying…" : "Apply order"}</button></footer></section>}
+      {orderPreview && <section className="order-review panel" aria-label="Load order review"><h2>Review deployment changes</h2><p>Close the game before applying. Failed changes are rolled back.</p><div className="review-stats"><b>{orderPreview.moves.length}</b><span>file rename{orderPreview.moves.length === 1 ? "" : "s"}</span><b>{orderPreview.winnerChanges.length}</b><span>winner change{orderPreview.winnerChanges.length === 1 ? "" : "s"}</span></div>{orderPreview.moves.length > 0 && <ul className="move-list">{orderPreview.moves.map((move, index) => <li key={`${move.modId}-${index}`}><span>{move.from}</span><b>→</b><span>{move.to}</span></li>)}</ul>}<footer className="dialog-actions"><button onClick={onCancelOrder} disabled={orderBusy}>Back</button><button className="primary" onClick={() => onApplyOrder(orderPreview.orderedModIds)} disabled={orderBusy}>{orderBusy ? "Applying…" : "Apply order"}</button></footer></section>}
     </section>
     <aside className="conflict-panel panel"><p className="eyebrow">CONFLICT WINNERS</p><h2>Package overlaps</h2>{conflicts.length === 0 ? <p className="muted">No package-level overlaps are known.</p> : conflicts.map(group => { const winner = winnerFor(group, orderIds, loadOrder.entries); const unsupportedMember = group.memberIds.some(id => byId.get(id)?.supported === false); const status = group.active && group.potential ? "Active + potential" : group.active ? "Active" : "Potential"; return <article key={group.id}><span>{status} · {group.packageCount} package{group.packageCount === 1 ? "" : "s"}</span><b>{group.memberIds.map(id => names.get(id) ?? "Unknown mod").join(" ↔ ")}</b><small>{group.active && winner ? `${names.get(winner)} wins` : unsupportedMember ? "Winner unavailable for an unsupported layout" : "Enable at least two mods to choose a winner"}</small></article>; })}</aside>
   </div>;
 
   return <div className="page">
-    <header className="page-header"><div><p className="eyebrow">MANAGED LIBRARY</p><h1>Mods</h1><p className="muted">Every deployed file is ownership-tracked and checksum guarded.</p></div><div className="header-actions"><button onClick={onCheckUpdates} disabled={checkingUpdates || !canCheckUpdates} title={canCheckUpdates ? updates?.checkedAt ? `Last checked ${formatDate(updates.checkedAt)}` : "Ask Nexus Mods whether newer files exist" : "Add a Nexus Mods API key in Settings to check for updates"}><RefreshCw aria-hidden size={17} className={checkingUpdates ? "spin" : undefined} />{checkingUpdates ? "Checking…" : "Check for updates"}</button><button onClick={onDiscover} disabled={discovering}>{discovering ? "Scanning…" : "Discover existing mods"}</button><button className="primary" onClick={onInstall}>Install mod</button></div></header>
+    <header className="page-header"><div><h1>Mods</h1></div><div className="header-actions"><button onClick={onDiscover} disabled={discovering}>{discovering ? "Scanning…" : "Scan game folder"}</button><button className="primary" onClick={onInstall}>Install mod</button></div></header>
     <div className="page-tabs" role="tablist" aria-label="Mods views" onKeyDown={event => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); selectTab(tab === "library" ? "load-order" : "library"); } }}><button id="mods-library-tab" role="tab" aria-controls="mods-library-panel" aria-selected={tab === "library"} tabIndex={tab === "library" ? 0 : -1} className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}>Library</button><button id="mods-load-order-tab" role="tab" aria-controls="mods-load-order-panel" aria-selected={tab === "load-order"} tabIndex={tab === "load-order" ? 0 : -1} className={tab === "load-order" ? "active" : ""} onClick={() => setTab("load-order")}>Load order</button></div>
     <div id={`mods-${tab}-panel`} role="tabpanel" aria-labelledby={`mods-${tab}-tab`}>{tab === "library" ? library : orderView}</div>
-    {detail && <section className="panel mod-details" aria-label={`${detail.name} details`}><button className="detail-close" onClick={() => setSelected(null)} aria-label="Close details"><X size={17} /></button><p className="eyebrow">MOD DETAILS</p><h2>{detail.name}</h2><div className="detail-list"><div><span>Version</span><b>{detail.version ?? "Not provided"}</b></div><div><span>Type</span><b>{detail.modType}</b></div><div><span>Status</span><b>{detail.enabled ? "Enabled" : "Disabled"}</b></div><div><span>Game build when installed</span><b>{detail.installedBuild ?? "Unknown"}</b></div><div><span>Packages</span><b>{detail.packageCount}</b></div><div><span>Active conflicts</span><b>{detail.conflictCount}</b></div></div>
-      {detail.fomod && <div className="nexus-link"><p className="muted">This mod retains its guided installer and your last choices. Reopening it changes nothing until you finish the wizard, review the replacement, and confirm.</p><button onClick={() => onReconfigure(detail)} disabled={busy === detail.id}><Settings2 aria-hidden size={16} />Reconfigure FOMOD</button></div>}
-      <h3>Nexus Mods</h3>
-      {detail.nexusIgnored
-        ? <div className="nexus-link"><p className="muted">Not checked for updates. This mod is left out of every check, including the archive lookup that matches mods to their Nexus page.</p><button onClick={() => onSetModChecked(detail, true)}>Check this mod again</button></div>
-        : detail.nexusModId !== null
-          ? <div className="nexus-link"><p>Checked for updates against Nexus mod <b>#{detail.nexusModId}</b>.</p><div className="settings-actions"><button onClick={() => onOpenModPage(detail)}><ExternalLink aria-hidden size={16} />Open on Nexus Mods</button><button onClick={() => onSetModChecked(detail, false)}>Stop checking this mod</button></div></div>
-          : <div className="nexus-link">
-              <p className="muted">This mod was not installed from a Nexus download that could be matched, so it is not checked for updates. Paste its Nexus address to check it anyway, or leave it out of checking for good — a mod that is not on Nexus costs a lookup on every check.</p>
-              <div className="input-action">
-                <input value={reference} onChange={event => setReference(event.target.value)} placeholder="https://www.nexusmods.com/starwarszerocompany/mods/…" aria-label={`Nexus Mods address for ${detail.name}`} spellCheck={false} />
-                <button disabled={!reference.trim()} onClick={() => { onLinkMod(detail, reference); setReference(""); }}>Link</button>
-              </div>
-              <button onClick={() => onSetModChecked(detail, false)}>Never check this mod</button>
-            </div>}
+    {detail && <section className="panel mod-details" aria-label={`${detail.name} details`}><button className="detail-close" onClick={() => setSelected(null)} aria-label="Close details"><X size={17} /></button><p className="eyebrow">MOD DETAILS</p><h2>{detail.name}</h2><div className="detail-list"><div><span>Version</span><b>{detail.version ?? "Not provided"}</b></div><div><span>Type</span><b>{detail.modType}</b></div><div><span>Status</span><b>{detail.enabled ? "Enabled" : "Disabled"}</b></div><div><span>Game build when installed</span><b>{detail.installedBuild ?? "Unknown"}</b></div><div><span>Packages</span><b>{detail.packageCount}</b></div><div><span>Active conflicts</span><b>{detail.conflictCount}</b></div>{detail.bundleId && <div><span>Install group</span><b>{mods.filter(mod => mod.bundleId === detail.bundleId).length}-component atomic bundle</b></div>}</div>
+      {detail.fomod && <div className="nexus-link"><p className="muted">Review installer choices before replacing this mod.</p><button onClick={() => onReconfigure(detail)} disabled={busy === detail.id}><Settings2 aria-hidden size={16} />Reconfigure FOMOD</button></div>}
+      {detail.nexusUrl && <button onClick={() => onOpenModPage(detail)}><ExternalLink aria-hidden size={16} />Open on Nexus Mods</button>}
       <h3>Managed files</h3><ul className="file-list">{detail.files.map(file => <li key={file.destination}>{file.name} · {file.sha256.slice(0, 12)}…</li>)}</ul></section>}
   </div>;
 }

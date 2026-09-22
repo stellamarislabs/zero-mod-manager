@@ -14,6 +14,10 @@ Zero Mod Manager is the maintained community continuation of ZCOM Mod Manager 0.
 
 ## Brand Personality
 
+### Unified application direction, 2026-09-22 (supersedes holotable)
+
+The user explicitly retired the holographic Command Center concept after reviewing its implementation. All pages now follow the existing restrained application theme, with shared colors, typography, borders and buttons. The sidebar and launch toolbar belong to the persistent Shell and must not move or resize on page navigation. Command Center preserves its evidence, system selection and operational actions through a simple list and detail layout, without a hologram, projection effects or a home-only masthead.
+
 Tactical, trustworthy, restrained. The interface should feel like a calm operations console: precise about risk, explicit about state, and quiet when no action is required.
 
 ## Anti-references

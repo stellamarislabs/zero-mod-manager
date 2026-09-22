@@ -25,3 +25,8 @@ release/*.deb
 release/*.AppImage
 testing/
 packaging/
+# Local packages, synthetic browser evidence and build metadata
+artifacts/
+output/
+.playwright-cli/
+src-tauri/gen/

@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, LaunchReport, LegacyImportReport, LegacyImportStatus, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, ModUpdateReport, NexusAccount, NexusStatus, ToolInfo, Ue4ssInstallReport, UpdateInfo } from "../types";
+import type { AdoptionGroup, AdoptionReport, AppSettings, BundleInstallItem, BundleInstallReport, CompatibilityReport, ConfigChangePreview, ConfigDocument, ConfigPatchRecord, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodReconfiguration, FomodSession, Inspection, IsolationSession, LaunchMode, LaunchPreflight, LaunchReport, LaunchSession, LegacyImportReport, LegacyImportStatus, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, OperationRecord, ProfileDetail, ProfileSummary, ProfileSwitchPreview, SnapshotSummary, SupportBundlePreview, SupportBundleReport, ToolInfo, Ue4ssInstallReport, UpdateInfo } from "../types";
 
 export const backend = {
+  frontendReady: () => invoke<void>("frontend_ready"),
   dashboard: () => invoke<Dashboard>("get_dashboard"),
   mods: () => invoke<ModSummary[]>("list_mods"),
   loadOrder: () => invoke<LoadOrderState>("get_load_order_state"),
@@ -16,7 +17,8 @@ export const backend = {
   discoverExistingMods: () => invoke<ExistingModScan>("discover_existing_mods"),
   adoptExistingMods: (scanId: string, groups: AdoptionGroup[]) => invoke<AdoptionReport>("adopt_existing_mods", { scanId, groups }),
   acknowledgeExistingModPrompt: () => invoke<void>("acknowledge_existing_mod_prompt"),
-  install: (stagingId: string, name?: string, replace?: string, force = false) => invoke<ModSummary>("install_mod", { stagingId, name: name ?? null, replace: replace ?? null, force }),
+  install: (stagingId: string, name?: string, replace?: string, force = false, allowUnverified = false) => invoke<ModSummary>("install_mod", { stagingId, name: name ?? null, replace: replace ?? null, force, allowUnverified }),
+  installBundle: (items: BundleInstallItem[]) => invoke<BundleInstallReport>("install_bundle", { items }),
   discardPreviews: (stagingIds: string[]) => invoke<void>("discard_previews", { stagingIds }),
   rename: (id: string, name: string) => invoke<void>("rename_mod", { id, name }),
   setEnabled: (id: string, enabled: boolean, force = false) => invoke<void>("set_mod_enabled", { id, enabled, force }),
@@ -26,17 +28,6 @@ export const backend = {
   installUe4ss: (path: string) => invoke<Ue4ssInstallReport>("install_ue4ss", { path }),
   links: () => invoke<Links>("get_links"),
   checkForUpdates: () => invoke<UpdateInfo>("check_for_updates"),
-  nexusStatus: () => invoke<NexusStatus>("nexus_status"),
-  setNexusKey: (key: string) => invoke<NexusAccount>("set_nexus_key", { key }),
-  clearNexusKey: () => invoke<void>("clear_nexus_key"),
-  setNxmHandler: (enabled: boolean) => invoke<NexusStatus>("set_nxm_handler", { enabled }),
-  nexusDownload: (url: string) => invoke<string>("nexus_download", { url }),
-  modUpdates: () => invoke<ModUpdateReport>("mod_updates"),
-  checkModUpdates: (force: boolean) => invoke<ModUpdateReport>("check_mod_updates", { force }),
-  setNexusAutoCheck: (enabled: boolean) => invoke<void>("set_nexus_auto_check", { enabled }),
-  linkModToNexus: (modId: string, reference: string) => invoke<ModUpdateReport>("link_mod_to_nexus", { modId, reference }),
-  setModChecked: (modId: string, checked: boolean) => invoke<ModUpdateReport>("set_mod_checked", { modId, checked }),
-  takePendingNxm: () => invoke<string | null>("take_pending_nxm"),
   diagnostics: () => invoke<DiagnosticReport>("run_diagnostics"),
   settings: () => invoke<AppSettings>("get_settings"),
   sevenZipStatus: () => invoke<ToolInfo>("seven_zip_status"),
@@ -47,10 +38,43 @@ export const backend = {
   copyDiagnostics: () => invoke<string>("diagnostic_report"),
   openManagedPath: (kind: "game" | "mods" | "logs" | "data" | "library" | "ue4ss-log" | `mod:${string}` | `installed:${string}`) => invoke<void>("open_managed_path", { kind }),
   launchGame: () => invoke<LaunchReport>("launch_game"),
+  profiles: () => invoke<ProfileSummary[]>("list_profiles"),
+  profile: (profileId: string) => invoke<ProfileDetail>("get_profile", { profileId }),
+  activeProfile: () => invoke<ProfileDetail | null>("active_profile"),
+  createProfile: (name: string, notes: string) => invoke<ProfileDetail>("create_profile", { name, notes }),
+  updateProfile: (profileId: string, name: string, notes: string, requiredRuntime: string | null) => invoke<ProfileDetail>("update_profile", { profileId, name, notes, requiredRuntime }),
+  deleteProfile: (profileId: string) => invoke<void>("delete_profile", { profileId }),
+  setProfileModState: (profileId: string, modId: string, enabled: boolean, priority: number | null) => invoke<ProfileDetail>("set_profile_mod_state", { profileId, modId, enabled, priority }),
+  previewProfileSwitch: (profileId: string) => invoke<ProfileSwitchPreview>("preview_profile_switch", { profileId }),
+  activateProfile: (profileId: string) => invoke<ProfileDetail>("activate_profile", { profileId }),
+  exportProfileLock: (profileId: string, path: string) => invoke<void>("export_profile_lock", { profileId, path }),
+  importProfileLock: (path: string) => invoke<ProfileDetail>("import_profile_lock", { path }),
+  snapshots: () => invoke<SnapshotSummary[]>("list_snapshots"),
+  createSnapshot: (label: string, lastKnownGood: boolean) => invoke<SnapshotSummary>("create_snapshot", { label, lastKnownGood }),
+  restoreSnapshot: (snapshotId: string) => invoke<ProfileDetail>("restore_snapshot", { snapshotId }),
+  compatibility: () => invoke<CompatibilityReport>("compatibility_report"),
+  updateCompatibilityCatalog: () => invoke<CompatibilityReport>("update_compatibility_catalog"),
+  activity: () => invoke<OperationRecord[]>("activity"),
+  configDocuments: () => invoke<ConfigDocument[]>("list_config_documents"),
+  readConfigDocument: (path: string) => invoke<ConfigDocument>("read_config_document", { path }),
+  previewConfigChange: (path: string, content: string) => invoke<ConfigChangePreview>("preview_config_change", { path, content }),
+  applyConfigChange: (path: string, content: string, expectedSha256: string) => invoke<ConfigPatchRecord>("apply_config_change", { path, content, expectedSha256 }),
+  configHistory: () => invoke<ConfigPatchRecord[]>("config_history"),
+  rollbackConfigChange: (patchId: string) => invoke<void>("rollback_config_change", { patchId }),
+  launchPreflight: () => invoke<LaunchPreflight>("launch_preflight"),
+  launchGameMode: (mode: LaunchMode, enabledModIds: string[] = []) => invoke<LaunchReport>("launch_game_mode", { mode, enabledModIds }),
+  completeLaunchSession: (sessionId: string, outcome: LaunchSession["outcome"], evidence: string | null = null) => invoke<LaunchSession>("complete_launch_session", { sessionId, outcome, evidence }),
+  launchSessions: () => invoke<LaunchSession[]>("launch_sessions"),
+  startGuidedIsolation: () => invoke<IsolationSession>("start_guided_isolation"),
+  activeGuidedIsolation: () => invoke<IsolationSession | null>("active_guided_isolation"),
+  advanceGuidedIsolation: (isolationId: string, outcome: NonNullable<LaunchSession["outcome"]>) => invoke<IsolationSession>("advance_guided_isolation", { isolationId, outcome }),
+  cancelGuidedIsolation: (isolationId: string) => invoke<void>("cancel_guided_isolation", { isolationId }),
+  supportBundlePreview: () => invoke<SupportBundlePreview>("support_bundle_preview"),
+  createSupportBundle: (path: string) => invoke<SupportBundleReport>("create_support_bundle", { path }),
   reportInterfaceError: (message: string, stack: string | null, context: string) => invoke<void>("report_interface_error", { message, stack, context }),
   reportInterfaceLayout: (context: string) => invoke<void>("report_interface_layout", { context }),
   legacyImportStatus: () => invoke<LegacyImportStatus>("legacy_import_status"),
-  importLegacyData: (includeNexusKey: boolean) => invoke<LegacyImportReport>("import_legacy_data", { includeNexusKey })
+  importLegacyData: () => invoke<LegacyImportReport>("import_legacy_data")
 };
 
 interface GameInfo {
@@ -60,7 +84,7 @@ interface GameInfo {
   installState: string | null;
   engine: string;
   compatDataPath: string | null;
-  source: "automatic" | "manual" | "none";
+  source: "automatic" | "manual" | "ea" | "none";
 }
 
 /**

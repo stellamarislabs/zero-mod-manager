@@ -16,6 +16,38 @@ pub struct Inspection {
     pub details: String,
 }
 
+/// Only an absent verifier may be waived, never a failed verification.
+pub fn require_install_consent(staged: &crate::models::StagedMod, allow_unverified: bool) -> Result<()> {
+    if staged.mod_type != "iostore" { return Ok(()); }
+    check_verification(&staged.verification, staged.verification_details.as_deref(), allow_unverified)
+}
+
+fn check_verification(state: &str, detail: Option<&str>, allow_unverified: bool) -> Result<()> {
+    match state {
+        "passed" => Ok(()),
+        "unavailable" if allow_unverified => Ok(()),
+        "unavailable" => Err(AppError::Other("IoStore verification is unavailable. Confirm installation without container verification to continue.".into())),
+        _ => Err(AppError::RetocVerificationFailed(detail.unwrap_or("Container verification did not pass.").into())),
+    }
+}
+
+#[cfg(test)]
+mod consent_tests {
+    use super::*;
+    #[test]
+    fn missing_verifier_requires_explicit_consent() {
+        assert!(check_verification("unavailable", None, false).is_err());
+        assert!(check_verification("unavailable", None, true).is_ok());
+    }
+    #[test]
+    fn failed_or_unknown_verification_cannot_be_bypassed() {
+        for state in ["failed", "unknown", "not-required", ""] {
+            assert!(check_verification(state, Some("Broken container"), true).is_err());
+        }
+        assert!(check_verification("passed", None, false).is_ok());
+    }
+}
+
 pub fn find(configured: Option<&str>) -> ToolInfo {
     let name = if cfg!(windows) { "retoc.exe" } else { "retoc" };
     let path = configured

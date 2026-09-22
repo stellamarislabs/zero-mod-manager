@@ -33,14 +33,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf p7zip-full
       - run: npm ci
-      - name: Prepare verified retoc sidecar
-        shell: bash
-        if: runner.os == 'Linux'
-        run: npm run prepare:retoc
-      - name: Prepare verified retoc sidecar
-        shell: pwsh
-        if: runner.os == 'Windows'
-        run: ./scripts/prepare-retoc.ps1
       - run: npm run typecheck
       - run: npm test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -48,3 +40,10 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --all-features
       - name: Production application build
         run: npm run tauri build -- --no-bundle
+      - name: Verify embedded Windows frontend starts without localhost
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter *.exe -File | Select-Object -First 1
+          if (-not $exe) { throw "Production executable was not created." }
+          ./scripts/smoke-production.ps1 -Executable $exe.FullName

@@ -3,7 +3,9 @@ pub(crate) mod naming;
 use crate::{
     archives,
     error::{AppError, Result},
-    models::{ManifestGame, ModManifest, ModPreview, PayloadFile, StagedMod, ToolInfo},
+    models::{
+        ManifestGame, ModManifest, ModPreview, PackageAssessment, PayloadFile, StagedMod, ToolInfo,
+    },
     retoc, ue4ss,
 };
 use naming::display_name;
@@ -18,16 +20,120 @@ use walkdir::WalkDir;
 /// Loader shims a game-folder mod such as ReShade ships. The file replaces a
 /// system library next to the executable, so it belongs in `Binaries/Win64`
 /// rather than in the mod folders.
-const INJECTOR_NAMES: [&str; 8] = [
+const INJECTOR_NAMES: [&str; 15] = [
     "dxgi.dll",
     "d3d9.dll",
     "d3d11.dll",
     "d3d12.dll",
     "opengl32.dll",
     "dinput8.dll",
+    "dsound.dll",
+    "winhttp.dll",
+    "xinput1_1.dll",
+    "xinput1_2.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "xinput9_1_0.dll",
     "winmm.dll",
     "version.dll",
 ];
+
+/// Classifies packages that must never be mined for nested sample mods. Mod
+/// authoring tools and self-installing downloads often contain valid PAK
+/// examples, but treating those examples as the product is misleading.
+pub fn assess_package(executables: &[String]) -> PackageAssessment {
+    let mut native_files = executables.to_vec();
+    native_files.sort();
+    native_files.dedup();
+    native_files.truncate(200);
+
+    let executable = executables.iter().find(|path| {
+        matches!(
+            Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("exe" | "msi")
+        )
+    });
+    let script = executables.iter().find(|path| {
+        matches!(
+            Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("bat" | "cmd" | "ps1" | "sh" | "vbs")
+        )
+    });
+
+    if let Some(path) = executable {
+        let lower = file_name(Path::new(path)).to_ascii_lowercase();
+        let installer = ["setup", "install", "patcher", "update"]
+            .iter()
+            .any(|word| lower.contains(word));
+        return PackageAssessment {
+            role: if installer {
+                "externalInstaller"
+            } else {
+                "externalTool"
+            }
+            .into(),
+            title: if installer {
+                "External installer"
+            } else {
+                "External application"
+            }
+            .into(),
+            reason: if installer {
+                "This download contains its own setup program. Zero Mod Manager did not run it and will not infer installable mods from files bundled inside it."
+            } else {
+                "This download contains a standalone application. It is not a deployable game mod, even if it includes sample mod files."
+            }
+            .into(),
+            native_files,
+        };
+    }
+    if script.is_some() {
+        return PackageAssessment {
+            role: "externalInstaller".into(),
+            title: "Scripted external installer".into(),
+            reason: "This download contains an installation script. Zero Mod Manager never executes archive scripts automatically.".into(),
+            native_files,
+        };
+    }
+    PackageAssessment {
+        role: "unknown".into(),
+        title: "Package inspection".into(),
+        reason: "No package role has been established yet.".into(),
+        native_files,
+    }
+}
+
+pub fn resolved_assessment(
+    previews: &[ModPreview],
+    mut assessment: PackageAssessment,
+) -> PackageAssessment {
+    if previews
+        .iter()
+        .all(|preview| preview.mod_type == "ue4ss-runtime")
+    {
+        assessment.role = "runtime".into();
+        assessment.title = "Runtime package".into();
+        assessment.reason =
+            "This package installs the UE4SS runtime used by script and native mods.".into();
+    } else {
+        assessment.role = "modBundle".into();
+        assessment.title = "Mod bundle".into();
+        assessment.reason = format!(
+            "{} recognized component{} will be reviewed before deployment.",
+            previews.len(),
+            if previews.len() == 1 { "" } else { "s" }
+        );
+    }
+    assessment
+}
 
 /// Where a game-folder mod's files are anchored inside the installation.
 const GAME_CONTENT_ROOT: &str = "SWZeroCompany";
@@ -420,6 +526,7 @@ fn collect(
             version: preview.version.clone(),
             author: None,
             description: preview.description.clone(),
+            manifest: None,
             mod_type: "ue4ss-runtime".into(),
             deployment_keys: Vec::new(),
             files: Vec::new(),
@@ -447,7 +554,7 @@ fn collect(
         })
         .collect();
     for (_, manifest) in &manifests {
-        if manifest.schema_version != 1 {
+        if !matches!(manifest.schema_version, 1 | 2) {
             return Err(AppError::Other(format!(
                 "Unsupported zcom-mod.json schema version {}.",
                 manifest.schema_version
@@ -939,7 +1046,7 @@ fn collect(
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("pak"))
             });
         let valid = match bucket.kind {
-            "iostore" => verification == "passed",
+            "iostore" => matches!(verification.as_str(), "passed" | "unavailable"),
             "ue4ss" => ue4ss_ready,
             _ => true,
         };
@@ -967,6 +1074,7 @@ fn collect(
                 .or_else(|| source_version.clone()),
             author: manifest.and_then(|m| m.author.clone()),
             description: manifest.and_then(|m| m.description.clone()),
+            manifest: manifest.cloned(),
             mod_type: bucket.kind.into(),
             deployment_keys: bucket.keys.clone(),
             files: bucket.files.clone(),
@@ -1071,6 +1179,25 @@ mod tests {
         ToolInfo::default()
     }
 
+    #[test]
+    fn setup_programs_are_external_installers_not_mod_payloads() {
+        let assessment = assess_package(&[
+            "Aftermath_DLC_Setup.exe".into(),
+            "payload/SWZeroCompany/Content/Paks/~mods/example.pak".into(),
+        ]);
+        assert_eq!(assessment.role, "externalInstaller");
+        assert!(assessment.reason.contains("did not run"));
+    }
+
+    #[test]
+    fn authoring_applications_are_external_tools_even_with_sample_mods() {
+        let assessment = assess_package(&[
+            "ZeroCompanyModdingTool.exe".into(),
+            "BaseMods/Example.dll".into(),
+        ]);
+        assert_eq!(assessment.role, "externalTool");
+    }
+
     fn write(path: &Path, body: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
@@ -1142,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_complete_iostore_triplet_and_requires_verifier() {
+    fn detects_complete_iostore_triplet_without_verifier() {
         let s = tempdir().unwrap();
         let c = tempdir().unwrap();
         for ext in ["pak", "utoc", "ucas"] {
@@ -1152,7 +1279,7 @@ mod tests {
         assert_eq!(preview.mod_type, "iostore");
         assert_eq!(preview.files.len(), 3);
         assert_eq!(preview.verification, "unavailable");
-        assert!(!preview.valid);
+        assert!(preview.valid);
         assert!(preview.load_order_supported);
     }
 

@@ -18,7 +18,7 @@ const preview = (stagingId: string, name: string, modType: PreviewType = "ue4ss"
 
 function props(overrides: Partial<Parameters<typeof InstallPage>[0]> = {}): Parameters<typeof InstallPage>[0] {
   return {
-    previews: [], names: {}, loading: false, download: null, advanced: false, installing: null,
+    previews: [], packageAssessment: null, names: {}, loading: false, advanced: false, installing: null,
     installer: null, installerRestored: null, installerCanGoBack: false,
     onInstallerNext: vi.fn(), onInstallerBack: vi.fn(),
     onAdvanced: vi.fn(), onName: vi.fn(), onChooseFile: vi.fn(), onChooseFolder: vi.fn(),
@@ -27,6 +27,16 @@ function props(overrides: Partial<Parameters<typeof InstallPage>[0]> = {}): Para
 }
 
 describe("install preview", () => {
+  it("offers an explicit unverified install when retoc is unavailable", () => {
+    render(<InstallPage {...props({ previews: [{ ...preview("io", "Containers", "iostore"), verification: "unavailable" }] })} />);
+    const button = screen.getByRole("button", { name: /Install without verification/ }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it("does not enable installation after failed verification", () => {
+    render(<InstallPage {...props({ previews: [{ ...preview("io", "Broken", "iostore"), verification: "failed", valid: false }] })} />);
+    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("offers every mod an archive contains", () => {
     render(<InstallPage {...props({ previews: [preview("a", "ShadowsCore"), preview("b", "ShadowsTweaks")] })} />);
     expect(screen.getByText("2 components found in this download")).toBeDefined();
@@ -79,6 +89,18 @@ describe("install preview", () => {
     render(<InstallPage {...props()} />);
     expect(screen.getByText(/UE4SS Lua or DLL mod/)).toBeDefined();
   });
+
+  it("blocks an external installer without offering a mod install action", () => {
+    render(<InstallPage {...props({ packageAssessment: {
+      role: "externalInstaller",
+      title: "External installer",
+      reason: "This download contains its own setup program.",
+      nativeFiles: ["Aftermath_DLC_Setup.exe"]
+    } })} />);
+    expect(screen.getByText("NOT A MANAGED MOD")).toBeDefined();
+    expect(screen.getByText("Aftermath_DLC_Setup.exe")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  });
 });
 
 describe("upgrades", () => {
@@ -94,7 +116,7 @@ describe("upgrades", () => {
     expect(onInstall).toHaveBeenCalledWith(upgrade);
   });
 
-  it("offers to update every component when a bundle matches old installs", () => {
+  it("keeps bundle updates on the individually reversible path", () => {
     const core = {
       ...preview("core", "Squad Six - Core", "iostore"),
       replaces: { modId: "old-core", name: "Squad Six - Core", version: "1.0.1", reason: "It ships the same container files." }
@@ -104,7 +126,9 @@ describe("upgrades", () => {
       replaces: { modId: "old-runtime", name: "Squad Six - Runtime", version: "1.0.1", reason: "It uses the same UE4SS mod folder." }
     };
     render(<InstallPage {...props({ previews: [core, runtime] })} />);
-    expect(screen.getByRole("button", { name: "Update all components" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: /all components/i })).toBeNull();
+    expect(screen.getByText(/install each component separately/i)).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "Replace installed version" })).toHaveLength(2);
   });
 });
 

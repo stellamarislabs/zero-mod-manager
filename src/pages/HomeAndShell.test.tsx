@@ -14,7 +14,7 @@ const dashboard: Dashboard = {
     path: "/games/Star Wars Zero Company",
     steamBuildId: "24874058",
     installState: "4",
-    engine: "UE 5.6.1",
+    engine: "Unreal Engine 5 (minor version unverified)",
     compatDataPath: null,
     source: "automatic"
   },
@@ -34,6 +34,7 @@ const dashboard: Dashboard = {
   },
   previousBuildId: null,
   dataDirectory: "/data/zcom",
+  storageMode: "platform",
   retoc: { found: true, path: "/bin/retoc", version: "retoc 0.1.5" },
   existingModScanPending: false
 };
@@ -130,6 +131,37 @@ describe("home desktop actions", () => {
     />);
     await userEvent.click(screen.getByRole("button", { name: "Launch game" }));
     expect(onLaunchGame).toHaveBeenCalledOnce();
+  });
+
+  it("turns holotable systems and command tabs into real actions", async () => {
+    const onOpenGame = vi.fn();
+    const onHealth = vi.fn();
+    const onInstall = vi.fn();
+    render(<HomePage
+      data={dashboard}
+      onInstall={onInstall}
+      onDiagnose={vi.fn()}
+      onLocate={vi.fn()}
+      onOpenMods={vi.fn()}
+      onOpenGame={onOpenGame}
+      onLaunchGame={vi.fn()}
+      onGetUe4ss={vi.fn()}
+      onInstallUe4ss={vi.fn()}
+      onHealth={onHealth}
+      compatibility={{ status: "warning", generatedAt: "2026-09-22T08:00:00Z", catalogState: "verified", issues: [{ id: "rule-1", status: "warning", ruleType: "load-after", title: "Review order", detail: "A soft rule needs review.", source: "community-catalog", evidenceUrl: null, memberIds: ["a", "b"] }] }}
+      busy={false}
+      launching={false}
+    />);
+
+    await userEvent.click(screen.getByRole("button", { name: /Game: ready/ }));
+    expect(screen.getByRole("heading", { name: "Game" })).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Open game folder" }));
+    expect(onOpenGame).toHaveBeenCalledOnce();
+
+    await userEvent.click(screen.getByRole("tab", { name: "operations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Install mod" }));
+    expect(onInstall).toHaveBeenCalledOnce();
+    expect(screen.getByRole("tab", { name: "operations" }).getAttribute("aria-selected")).toBe("true");
   });
 });
 

@@ -1,8 +1,7 @@
 import { AlertTriangle, Archive, ArrowUpCircle, Check, ChevronRight, Download, FileArchive, FolderOpen, Pencil, ShieldCheck, X } from "lucide-react";
 import { FomodWizard } from "../components/FomodWizard";
 import { StatusBadge } from "../components/StatusBadge";
-import type { DownloadProgress, FomodAnswer, FomodSession, ModPreview, PreviewType } from "../types";
-import { formatBytes } from "../utils/format";
+import type { FomodAnswer, FomodSession, ModPreview, PackageAssessment, PreviewType } from "../types";
 
 const typeLabel: Record<PreviewType, string> = {
   iostore: "IoStore packaged mod",
@@ -16,9 +15,9 @@ const typeLabel: Record<PreviewType, string> = {
 
 interface Props {
   previews: ModPreview[];
+  packageAssessment: PackageAssessment | null;
   names: Record<string, string>;
   loading: boolean;
-  download: DownloadProgress | null;
   advanced: boolean;
   installing: string | null;
   /** The scripted installer awaiting answers, when the download carries one. */
@@ -38,9 +37,9 @@ interface Props {
 }
 
 function verificationText(preview: ModPreview): string {
-  if (preview.verification === "passed") return "✓ retoc verification passed";
-  if (preview.verification === "not-required") return "✓ Not required";
-  if (preview.verification === "unavailable") return "retoc setup required";
+  if (preview.verification === "passed") return "Verified";
+  if (preview.verification === "not-required") return "Not required";
+  if (preview.verification === "unavailable") return "Not verified (retoc unavailable)";
   return "Verification failed";
 }
 
@@ -65,7 +64,7 @@ function Candidate({ preview, name, advanced, installing, onName, onAdvanced, on
         {preview.author && <p>by {preview.author}</p>}
         {preview.version && <p className="muted">Version {preview.version}</p>}
       </div>
-      <StatusBadge status={preview.valid ? "good" : "error"}>{preview.valid ? (runtime ? "Ready to set up" : "Ready to install") : "Validation failed"}</StatusBadge>
+      <StatusBadge status={preview.valid ? preview.verification === "unavailable" ? "warning" : "good" : "error"}>{preview.valid ? (preview.verification === "unavailable" ? "Unverified" : runtime ? "Ready to set up" : "Ready to install") : "Validation failed"}</StatusBadge>
     </div>
     {preview.description && <p className="description">{preview.description}</p>}
     {upgrade && <div className="inline-note upgrade-note" role="status"><b><ArrowUpCircle aria-hidden size={16} />Replaces {upgrade.name}{upgrade.version ? ` ${upgrade.version}` : ""}</b><span>{upgrade.reason} Installing puts this in its place, keeps its position in the load order, and removes the old version only once the new one is deployed.</span></div>}
@@ -81,59 +80,59 @@ function Candidate({ preview, name, advanced, installing, onName, onAdvanced, on
       <div className="inline-warning"><AlertTriangle aria-hidden size={17} /><div><b>Overlaps {preview.conflicts.length} installed mod{preview.conflicts.length === 1 ? "" : "s"}</b><span>{preview.loadOrderSupported ? "This mod will be installed at the highest priority and win these package conflicts." : `This layout is not orderable yet. ${preview.loadOrderSupportReason ?? "No winner will be claimed."}`}</span></div></div>
       <ul>{preview.conflicts.map(conflict => <li key={conflict.modId}><b>{conflict.name}</b><span>{conflict.packageCount} overlapping package{conflict.packageCount === 1 ? "" : "s"}</span></li>)}</ul>
     </section>}
+    {preview.verification === "unavailable" && <div className="inline-warning" role="alert"><AlertTriangle aria-hidden size={17} />Container integrity and package conflicts are unchecked. You will be asked to confirm before installing.</div>}
     {preview.warnings.map(warning => <div className="inline-warning" key={warning}><AlertTriangle aria-hidden size={17} />{warning}</div>)}
     <button className="disclosure" onClick={onAdvanced} aria-expanded={advanced}><ChevronRight className={advanced ? "rotated" : ""} size={16} />Advanced details</button>
     {advanced && <div className="advanced"><p>{preview.verificationDetails ?? "No additional tool output."}</p>{preview.packageNames.length > 0 && <><h3>Package paths (spoilers possible)</h3><code>{preview.packageNames.join("\n")}</code></>}</div>}
     <footer className="dialog-actions">
       {runtime
         ? <button className="primary" onClick={() => onInstallRuntime(preview)} disabled={busy}><Download size={17} />{thisBusy ? "Setting up…" : "Install UE4SS runtime"}</button>
-        : <button className="primary" onClick={() => onInstall(preview)} disabled={!preview.valid || busy}>{upgrade ? <ArrowUpCircle size={17} /> : <ShieldCheck size={17} />}{thisBusy ? (upgrade ? "Replacing…" : "Installing…") : upgrade ? "Replace installed version" : "Install"}</button>}
+        : <button className="primary" onClick={() => onInstall(preview)} disabled={!preview.valid || busy}>{upgrade ? <ArrowUpCircle size={17} /> : <ShieldCheck size={17} />}{thisBusy ? (upgrade ? "Replacing…" : "Installing…") : preview.verification === "unavailable" ? "Install without verification…" : upgrade ? "Replace installed version" : "Install"}</button>}
     </footer>
   </section>;
 }
 
-export function InstallPage({ previews, names, loading, download, advanced, installing, installer, installerRestored, installerCanGoBack, onInstallerNext, onInstallerBack, onAdvanced, onName, onChooseFile, onChooseFolder, onInstall, onInstallAll, onInstallRuntime, onCancel }: Props) {
+export function InstallPage({ previews, packageAssessment, names, loading, advanced, installing, installer, installerRestored, installerCanGoBack, onInstallerNext, onInstallerBack, onAdvanced, onName, onChooseFile, onChooseFolder, onInstall, onInstallAll, onInstallRuntime, onCancel }: Props) {
   const many = previews.length > 1;
   const optionCount = previews.filter(preview => preview.optionLabel).length;
   const additionalCount = previews.length - optionCount;
   const canInstallAll = many
     && optionCount === 0
+    && !previews.some(preview => preview.replaces)
     && previews.every(preview => preview.modType !== "ue4ss-runtime" && preview.valid);
+  const bundleContainsUpdate = many && optionCount === 0 && previews.some(preview => preview.replaces);
   return <div className="page install-page">
-    <header className="page-header"><div><p className="eyebrow">SAFE INSTALLER</p><h1>{installer ? "Choose your options" : previews.length ? "Review mod" : "Install a mod"}</h1><p className="muted">No changes are deployed until validation succeeds and you confirm.</p></div>{previews.length > 0 && <button onClick={onCancel}><X size={17} />{many ? "Cancel all" : "Cancel"}</button>}</header>
+    <header className="page-header"><div><h1>{installer ? "Choose your options" : previews.length ? "Review mod" : "Install a mod"}</h1></div>{previews.length > 0 && <button onClick={onCancel}><X size={17} />{many ? "Cancel all" : "Cancel"}</button>}</header>
     {installer
       // An archive that scripts its own installation asks its questions first;
       // the answers decide which of its files are read as mods to review.
       ? <FomodWizard session={installer} restored={installerRestored} busy={loading} canGoBack={installerCanGoBack} onNext={onInstallerNext} onBack={onInstallerBack} onCancel={onCancel} />
-      : previews.length === 0
-      ? download
-        // A handoff from the website: the transfer is the whole screen until
-        // there is a payload to review, so it is never a silent wait.
-        ? <section className="drop-zone downloading" aria-busy>
-          <div className="drop-icon"><Download aria-hidden size={32} /></div>
-          <h2>{download.name ? "Downloading from Nexus Mods" : "Contacting Nexus Mods…"}</h2>
-          <p>{download.name || "Resolving the download link for this file."}</p>
-          <div className="download-progress" role="progressbar" aria-label="Download progress" aria-valuemin={0} aria-valuemax={download.total ?? undefined} aria-valuenow={download.total ? download.done : undefined}>
-            <div className={`download-bar ${download.total ? "" : "indeterminate"}`} style={download.total ? { width: `${Math.min(100, Math.round((download.done / download.total) * 100))}%` } : undefined} />
+      : previews.length === 0 && packageAssessment && ["externalTool", "externalInstaller"].includes(packageAssessment.role)
+      ? <section className="panel preview-main" role="status">
+          <div className="preview-title">
+            <div className="mod-icon large"><AlertTriangle aria-hidden /></div>
+            <div className="preview-naming"><p className="eyebrow">NOT A MANAGED MOD</p><h2>{packageAssessment.title}</h2></div>
+            <StatusBadge status="warning">Not installed</StatusBadge>
           </div>
-          <p className="download-line">{download.total
-            ? `${formatBytes(download.done)} of ${formatBytes(download.total)} · ${Math.min(100, Math.round((download.done / download.total) * 100))}%`
-            : download.done > 0 ? formatBytes(download.done) : "Starting…"}</p>
-          <small>The file is inspected and confirmed before anything is installed.</small>
+          <p className="description">{packageAssessment.reason}</p>
+          {packageAssessment.nativeFiles.length > 0 && <><h3>Native or scripted files</h3><ul className="file-list">{packageAssessment.nativeFiles.map(file => <li key={file}><AlertTriangle aria-hidden size={16} />{file}</li>)}</ul></>}
+          <div className="inline-note"><ShieldCheck aria-hidden size={17} /><span>No executable or script was launched, and no game file was changed. Follow the mod author's instructions outside the manager only if you trust the download.</span></div>
+          <footer className="dialog-actions"><button className="primary" onClick={onCancel}>Close inspection</button></footer>
         </section>
-        : <section className={`drop-zone ${loading ? "loading" : ""}`} aria-busy={loading}>
+      : previews.length === 0
+      ? <section className={`drop-zone ${loading ? "loading" : ""}`} aria-busy={loading}>
           <div className="drop-icon"><Archive aria-hidden size={32} /></div>
           <h2>{loading ? "Inspecting payload…" : "Drop a mod here"}</h2>
           <p>ZIP, 7z, PAK, UTOC/UCAS, a UE4SS Lua or DLL mod, or a game-folder mod</p>
           <div><button className="primary" onClick={onChooseFile} disabled={loading}><FileArchive size={18} />Choose archive or file</button><button onClick={onChooseFolder} disabled={loading}><FolderOpen size={18} />Choose folder</button></div>
-          <small>Archives are treated as untrusted input and extracted into a temporary sandbox.</small>
+          
         </section>
-      : <div className="preview-grid">
+      : <div className="preview-stack">
         <div className="preview-stack">
-          {many && <div className="inline-note" role="status"><b>{optionCount ? `${optionCount} packaged options${additionalCount ? ` and ${additionalCount} additional mod${additionalCount === 1 ? "" : "s"}` : ""} found` : `${previews.length} components found in this download`}</b><span>{optionCount ? "Each containing folder is a separate version or component. Install only the option or options you want; alternatives may conflict if installed together." : "Review every component below. You can install the complete bundle at once or install components separately."}</span>{canInstallAll && <button className="primary" onClick={() => onInstallAll(previews)} disabled={installing !== null}><ShieldCheck size={17} />{installing === "all" ? "Installing bundle…" : previews.some(preview => preview.replaces) ? "Update all components" : "Install all components"}</button>}</div>}
+          {many && <div className="inline-note" role="status"><b>{optionCount ? `${optionCount} packaged options${additionalCount ? ` and ${additionalCount} additional mod${additionalCount === 1 ? "" : "s"}` : ""} found` : `${previews.length} components found in this download`}</b><span>{optionCount ? "Each containing folder is a separate version or component. Install only the option or options you want; alternatives may conflict if installed together." : bundleContainsUpdate ? "This download includes an update. Install each component separately while atomic multi-component update rollback is being completed." : "Review every component below. Installing the complete bundle is atomic: if any component fails, all completed components are rolled back."}</span>{canInstallAll && <button className="primary" onClick={() => onInstallAll(previews)} disabled={installing !== null}><ShieldCheck size={17} />{installing === "all" ? "Installing bundle…" : "Install all components"}</button>}</div>}
           {previews.map(preview => <Candidate key={preview.stagingId} preview={preview} name={names[preview.stagingId] ?? preview.name} advanced={advanced} installing={installing} onName={onName} onAdvanced={onAdvanced} onInstall={onInstall} onInstallRuntime={onInstallRuntime} />)}
         </div>
-        <aside className="panel safety-note"><ShieldCheck aria-hidden /><h2>Safe by default</h2><p>The manager keeps its own source copy, deploys only recognized payload files, and records a SHA-256 checksum for every destination.</p><ul><li>No executables are run</li><li>Unknown files are ignored</li><li>Partial installs roll back</li><li>Replaced game files are kept and restored</li><li>Changed files are kept on removal</li></ul></aside>
+
       </div>}
   </div>;
 }

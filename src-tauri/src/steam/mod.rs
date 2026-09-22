@@ -219,17 +219,89 @@ pub fn from_manual(path: &Path) -> Result<GameInfo> {
     let compat = find_steam_root_for_game(path)
         .map(|r| r.join("steamapps/compatdata").join(APP_ID))
         .filter(|p| p.exists());
+    let ea_metadata = ea_installer_metadata(path);
     Ok(GameInfo {
         detected: true,
         path: Some(path.display().to_string()),
-        steam_build_id: manifest.as_ref().map(|m| m.1.clone()),
-        install_state: manifest.map(|m| m.2),
-        engine: "UE 5.6.1".into(),
+        steam_build_id: manifest
+            .as_ref()
+            .map(|m| m.1.clone())
+            .or_else(|| ea_metadata.as_ref().and_then(|m| m.0.clone())),
+        install_state: manifest
+            .map(|m| m.2)
+            .or_else(|| ea_metadata.as_ref().map(|_| "installed".into())),
+        engine: "Unreal Engine 5 (minor version unverified)".into(),
         compat_data_path: compat.map(|p| p.display().to_string()),
-        source: "manual".into(),
+        source: if ea_metadata.is_some() {
+            "ea".into()
+        } else {
+            "manual".into()
+        },
         problem_code: None,
         problem: None,
     })
+}
+
+fn ea_installer_metadata(path: &Path) -> Option<(Option<String>, PathBuf)> {
+    let metadata = [
+        path.join("__Installer/installerdata.xml"),
+        path.join("__Installer/InstallerData.xml"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())?;
+    let text = fs::read_to_string(&metadata).ok().unwrap_or_default();
+    let version = Regex::new(r"(?i)<(?:buildVersion|version)>\s*([^<]+)\s*</")
+        .ok()?
+        .captures(&text)
+        .and_then(|capture| capture.get(1))
+        .map(|value| value.as_str().trim().to_string());
+    Some((version, metadata))
+}
+
+#[cfg(target_os = "windows")]
+fn ea_registry_paths() -> Vec<PathBuf> {
+    let mut result = BTreeSet::new();
+    for key in [
+        r"HKLM\SOFTWARE\EA Games\STAR WARS Zero Company",
+        r"HKLM\SOFTWARE\WOW6432Node\EA Games\STAR WARS Zero Company",
+        r"HKCU\SOFTWARE\EA Games\STAR WARS Zero Company",
+        r"HKLM\SOFTWARE\Electronic Arts\EA Desktop\STAR WARS Zero Company",
+    ] {
+        for value in ["Install Dir", "InstallDir", "InstallLocation"] {
+            let Ok(output) = crate::archives::quiet_command(Path::new("reg"))
+                .args(["query", key, "/v", value])
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some((_, path)) = line.split_once("REG_SZ") {
+                    let path = PathBuf::from(path.trim());
+                    if valid_game(&path) {
+                        result.insert(path);
+                    }
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ea_registry_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+pub fn discover_ea() -> Result<Option<GameInfo>> {
+    for path in ea_registry_paths() {
+        let mut info = from_manual(&path)?;
+        info.source = "ea".into();
+        return Ok(Some(info));
+    }
+    Ok(None)
 }
 
 fn find_steam_root_for_game(path: &Path) -> Option<PathBuf> {
@@ -272,7 +344,7 @@ pub fn discover_from_roots(roots: &[PathBuf]) -> Result<Option<GameInfo>> {
                 path: Some(game.display().to_string()),
                 steam_build_id: Some(build),
                 install_state: Some(state),
-                engine: "UE 5.6.1".into(),
+                engine: "Unreal Engine 5 (minor version unverified)".into(),
                 compat_data_path: compat.exists().then(|| compat.display().to_string()),
                 source: "automatic".into(),
                 problem_code: None,
@@ -303,7 +375,10 @@ pub fn discover() -> Result<Option<GameInfo>> {
             roots.push(PathBuf::from(format!("{}:\\SteamLibrary", letter as char)));
         }
     }
-    discover_from_roots(&roots)
+    match discover_from_roots(&roots)? {
+        Some(game) => Ok(Some(game)),
+        None => discover_ea(),
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,84 @@
 # Changelog
 
+### Local-first workflow update
+
+- Removed Discover, Nexus API/account integration, mod update queries and nxm download handling. Manual archives and external Nexus links remain.
+- Made unavailable retoc verification optional with explicit consent; failed verification stays blocked. Unverified containers remain visible in Library and Health.
+- Reduced repetitive screen introductions and moved technical evidence into expandable details.
+- Retired this application's stored Nexus credentials; no Vortex credentials are touched.
+
 All notable changes are documented here.
+
+## 0.7.0-rc.1 — Operational Readiness
+
+### Added
+
+- Production Windows packaging now emits the installer and portable ZIP from
+  Tauri's release pipeline. A release smoke test launches an isolated copy and
+  requires the embedded frontend to report ready without a localhost server.
+- Portable builds use normal per-user data by default and support an explicit
+  self-contained mode through `portable-data.flag` beside the executable.
+- Archive inspection now distinguishes mod bundles, runtimes, external tools,
+  and external installers. Standalone/setup executables are never run and no
+  longer cause nested sample PAK files to be offered as mods.
+- Native payload discovery now includes ASI files plus `dsound`, `winhttp`, and
+  common XInput proxy DLLs.
+- Fresh multi-component downloads now install through one backend transaction.
+  Components share a persistent bundle identity; a failure in deployment,
+  metadata, ordering, or profile capture removes the complete new bundle and
+  leaves its staged archive available for retry.
+
+- A Command Center with four explicit readiness states: Ready, Warning,
+  Blocked, and Unverified. Launch decisions now include the selected profile,
+  launcher, game build, compatibility findings, and UE4SS runtime evidence.
+- Named profiles, previewable atomic profile switches, portable Profile Lock
+  files, automatic snapshots, and user-created Last Known Good checkpoints.
+- Modded, temporary vanilla, and controlled troubleshoot launch modes. The
+  previous profile is restored after temporary sessions and after an
+  interrupted manager restart; session outcomes are labelled by the user rather
+  than inferred from a process exit.
+- A provenance-aware compatibility engine combining deployed-file ownership,
+  IoStore package overlap, manifest relationships, and signed community rules.
+  Ed25519 verification, expiry, schema checks, rollback protection, and a last
+  verified local cache are enforced before catalog data is trusted.
+- Config Workbench support for validated INI, JSON, and TOML edits with preview,
+  backups, optimistic concurrency checks, and rollback. Lua is deliberately
+  read-only.
+- Privacy-previewed local support bundles containing operational, profile,
+  compatibility, diagnostic, and bounded log evidence. Credentials, personal
+  paths, and save contents are excluded or redacted; bundles are never uploaded.
+- Steam, EA App metadata, and manual launcher profiles; activity history;
+  exact Nexus old-file to new-file update lineage; and public Manifest v2,
+  Profile Lock v1, and Compatibility Catalog v1 contracts.
+
+### Security
+
+- All deployment mutations are refused while the game is running.
+- Archive staging now enforces traversal/link rejection, Windows device-name,
+  path depth, component length, file count, expanded-size, single-file size,
+  and compression-ratio limits before deployment.
+- Native payloads remain inert archive data: installers and scripts from a mod
+  are never executed.
+
+### Changed
+
+- The product is now branded Zero Mod Manager. ZCOM Mod Manager remains visible
+  only as the GPL-3.0 upstream project and migration source.
+- Navigation is organized around Command Center, Library, Discover, Install,
+  Profiles, Health, Settings, and About.
+- A file merely being in the expected folder is no longer sufficient evidence
+  that UE4SS loaded. Runtime health requires its game-session log and reports
+  proxy/VC runtime/Proton problems separately.
+- The application no longer presents an unverified Unreal Engine minor version
+  as fact. Runtime and build evidence will supply an exact fingerprint when it
+  is available.
+
+### Release qualification
+
+- RC status does not claim universal Nexus compatibility. Stable promotion
+  still requires the real-game/platform matrix in `docs/QA-MATRIX.md`, zero open
+  P0/P1 issues, release signatures/checksums, and publication of matching GPL
+  source.
 
 ## 0.6.5
 
