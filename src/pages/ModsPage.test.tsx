@@ -82,6 +82,48 @@ describe("load-order helpers", () => {
     expect(winnerFor(conflict, ["alpha"], [entry("alpha"), unsupported])).toBeNull();
   });
 });
+describe("UE4SS component visibility", () => {
+  it("hides only known bundled folders without changing mod state", async () => {
+    const runtime = { ...installed("Renamed loader", "ue4ss"), files:[{name:"main.lua", destination:"C:\\Game\\ue4ss\\Mods\\BPModLoaderMod\\Scripts\\main.lua", size:1, sha256:"hash"}] };
+    const custom = { ...installed("Custom gameplay", "ue4ss"), files:[{name:"main.lua", destination:"/game/ue4ss/Mods/MyGameplay/Scripts/main.lua", size:1, sha256:"hash"}] };
+    const onToggle = vi.fn(), onSetHidden = vi.fn();
+    render(<ModsPage {...props({mods:[runtime,custom], onToggle,onSetHidden})} />);
+    expect(screen.queryByText("Renamed loader")).toBeNull();
+    expect(screen.getByText("Custom gameplay")).toBeTruthy();
+    await userEvent.click(screen.getByRole("checkbox", {name:"Hide UE4SS components"}));
+    expect(screen.getByText("Renamed loader")).toBeTruthy();
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(onSetHidden).not.toHaveBeenCalled();
+  });
+});
+describe("library cleanup safeguards", () => {
+  it("requires selection and acknowledgement; cancel removes nothing", async () => {
+    const onBulkRemove = vi.fn();
+    render(<ModsPage {...props({ mods: [installed("alpha", "pak")], onBulkRemove, onClearTemporary: vi.fn(), temporaryCount: 1 })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Clean library" }));
+    expect((screen.getByRole("button", { name: "Remove selected (0)" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole("checkbox", { name: "Select alpha for removal" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove selected (1)" }));
+    expect((screen.getByRole("button", { name: "Remove 1 mod" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onBulkRemove).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Remove selected (1)" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /I understand these mods/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove 1 mod" }));
+    expect(onBulkRemove).toHaveBeenCalledExactlyOnceWith([installed("alpha", "pak")]);
+  });
+  it("clears only previews after separate acknowledgement", async () => {
+    const onClearTemporary = vi.fn(), onBulkRemove = vi.fn();
+    render(<ModsPage {...props({ onBulkRemove, onClearTemporary, temporaryCount: 2 })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Clean library" }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear temporary files (2)" }));
+    expect((screen.getByRole("button", { name: "Clear temporary files" }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.click(screen.getByRole("checkbox", { name: /unfinished installation choices/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear temporary files" }));
+    expect(onClearTemporary).toHaveBeenCalledOnce();
+    expect(onBulkRemove).not.toHaveBeenCalled();
+  });
+});
 
 describe("load-order interface", () => {
   it("switches tabs with pointer and arrow keys while retaining keyboard focus", async () => {
@@ -243,7 +285,7 @@ describe("hiding a mod", () => {
   it("leaves hidden mods out of every other view and counts them", () => {
     render(<ModsPage {...props({ mods: [{ ...runtime, hidden: true }, installed("alpha", "iostore")] })} />);
     expect(screen.queryByText("BPML Generic Functions")).toBeNull();
-    expect(screen.getByText("1 of 2 shown · 1 hidden")).toBeDefined();
+    expect(screen.getByText("1 of 2 mods shown · 1 hidden")).toBeDefined();
   });
 
   it("shows them under the hidden filter, where they can be brought back", async () => {
@@ -339,5 +381,53 @@ describe("opening a mod on Nexus", () => {
     await userEvent.click(screen.getByRole("button", { name: "More details for ZCUnlocked" }));
     await userEvent.click(screen.getByRole("button", { name: "Open on Nexus Mods" }));
     expect(onOpenModPage).toHaveBeenCalledWith(linked);
+  });
+});
+describe("bundle library presentation", () => {
+  it("removes the entire package with one explicit confirmation", async () => {
+    const members = [{...installed("Paint","ue4ss"),bundleId:"b"},{...installed("UI","plugin"),bundleId:"b"}];
+    const onBundleAction = vi.fn();
+    render(<ModsPage {...props({mods:members,onBundleAction})} />);
+    await userEvent.click(screen.getByRole("button",{name:"Uninstall Paint"}));
+    const confirm = screen.getByRole("button",{name:"Uninstall mod"}) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(onBundleAction).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("checkbox",{name:"I understand the entire mod and all its components will be removed."}));
+    await userEvent.click(confirm);
+    expect(onBundleAction).toHaveBeenCalledTimes(1);
+    expect(onBundleAction).toHaveBeenCalledWith(members,"remove");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("offers package-wide actions without opening components", async () => {
+    const members = [{...installed("Paint","ue4ss"),bundleId:"b"},{...installed("UI","plugin"),bundleId:"b",enabled:false}];
+    const onBundleAction=vi.fn();
+    render(<ModsPage {...props({mods:members,onBundleAction})} />);
+    await userEvent.click(screen.getByRole("button",{name:"Verify Paint"}));
+    expect(onBundleAction).toHaveBeenCalledWith(members,"verify");
+    await userEvent.click(screen.getByRole("checkbox",{name:"Enable Paint"}));
+    expect(onBundleAction).toHaveBeenCalledWith(members,"toggle");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("counts a bundle once and exposes components in a drawer", async () => {
+    const first={...installed("Ship Paint","ue4ss"),bundleId:"ship"};
+    const second={...installed("Ship UI","plugin"),bundleId:"ship",enabled:false};
+    const onToggle=vi.fn();
+    render(<ModsPage {...props({mods:[first,second],onToggle})} />);
+    expect(screen.getByText("1 of 1 mods shown")).toBeTruthy();
+    expect(screen.queryByText("Ship UI")).toBeNull();
+    expect(screen.getByText("Partly enabled")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button",{name:"Components"}));
+    expect(screen.getByRole("dialog",{name:"Ship Paint components"})).toBeTruthy();
+    expect(screen.getByText("Ship UI")).toBeTruthy();
+    await userEvent.click(screen.getByRole("checkbox",{name:"Enabled: Ship UI"}));
+    expect(onToggle).toHaveBeenCalledWith(second);
+    await userEvent.click(screen.getByRole("button",{name:"Close"}));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("searches component names without losing the parent group", async () => {
+    render(<ModsPage {...props({mods:[{...installed("Paint","ue4ss"),bundleId:"b"},{...installed("Hangar","plugin"),bundleId:"b"}]})} />);
+    await userEvent.type(screen.getByRole("searchbox"),"Hangar");
+    expect(screen.getByText("Paint")).toBeTruthy();
+    expect(screen.getByText("1 of 1 mods shown")).toBeTruthy();
   });
 });

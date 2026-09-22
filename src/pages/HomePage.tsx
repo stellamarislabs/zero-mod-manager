@@ -104,7 +104,7 @@ export function HomePage({
       id: "game",
       label: "Game",
       status: game.detected ? "ready" : "blocked",
-      metric: game.steamBuildId ? `Build ${game.steamBuildId}` : "No build",
+      metric: game.detected ? "Game found" : "Not found",
       summary: game.detected ? `${game.source === "ea" ? "EA App" : game.source === "manual" ? "Manual" : "Steam"} installation verified.` : "Zero Company installation is not verified.",
       evidence: game.detected ? (game.path ?? "Detected installation") : (game.problem ?? "No valid executable location is available."),
       icon: Gamepad2,
@@ -113,9 +113,9 @@ export function HomePage({
     },
     {
       id: "runtime",
-      label: "Runtime",
+      label: "UE4SS",
       status: runtimeLoaded ? "ready" : ue4ss.installed ? "warning" : "unverified",
-      metric: ue4ss.installed ? `${ue4ss.modCount} UE4SS mod${ue4ss.modCount === 1 ? "" : "s"}` : "Not installed",
+      metric: runtimeLoaded ? "Loader detected" : ue4ss.installed ? "Needs checking" : "Not installed",
       summary: runtimeLoaded ? "UE4SS load is proven by runtime log evidence." : ue4ss.installed ? "Runtime files exist, but a clean load has not been proven." : "UE4SS is optional until a mod requires it.",
       evidence: ue4ss.message ?? (ue4ss.logFound ? "Runtime log found" : "No runtime log evidence yet"),
       icon: Puzzle,
@@ -128,7 +128,7 @@ export function HomePage({
       id: "profile",
       label: "Profile",
       status: profile ? "ready" : "unverified",
-      metric: `${profile?.enabledMods ?? data.enabledMods} enabled`,
+      metric: profile?.name ?? "No profile selected",
       summary: profile ? `${profile.name} is the active deployment profile.` : "No named profile is loaded; the current deployment is still usable.",
       evidence: profile?.requiredRuntime ? `Requires runtime ${profile.requiredRuntime}` : "No profile-specific runtime requirement",
       icon: Layers3,
@@ -152,8 +152,8 @@ export function HomePage({
       id: "compatibility",
       label: "Compatibility",
       status: compatibility?.status ?? "unverified",
-      metric: compatibility ? `${compatibility.issues.length} finding${compatibility.issues.length === 1 ? "" : "s"}` : "Awaiting analysis",
-      summary: compatibility ? (compatibility.issues.length ? "Local analysis and catalog evidence have findings to review." : "No compatibility finding is reported for this profile.") : "Compatibility is not guessed when evidence is unavailable.",
+      metric: compatibility ? compatibility.issues.length ? `${compatibility.issues.length} ${compatibility.issues.length === 1 ? "check" : "checks"} to review` : "No reported issues" : "Awaiting analysis",
+      summary: compatibility ? (compatibility.issues.length ? "Some compatibility checks need your attention." : "No known compatibility issues for this profile.") : "Compatibility has not been checked yet.",
       evidence: compatibility ? `Catalog: ${compatibility.catalogState} · ${formatDate(compatibility.generatedAt)}` : "Run Health to produce current evidence",
       icon: Puzzle,
       actionLabel: "Review compatibility",
@@ -175,20 +175,15 @@ export function HomePage({
     { title: "Runtime load evidence", detail: runtimeLoaded ? "UE4SS runtime log found" : "No clean runtime load confirmed", status: runtimeLoaded ? "ready" : "unverified" },
     { title: "Last checkpoint", detail: lastSnapshot?.label ?? "No checkpoint recorded", status: lastSnapshot ? "ready" : "unverified" },
   ];
-  const detailStats = selectedSystem === "compatibility" ? [
-    { value: compatibility ? findings.length : "?", label: "Findings", note: "Current analysis report", icon: FileText, status: "unverified" },
+  const detailStats = selectedSystem === "compatibility" && findings.length > 0 ? [
     { value: compatibility ? findings.filter(issue => issue.status === "warning").length : "?", label: "Warnings", note: "Review recommended", icon: TriangleAlert, status: "warning" },
-    { value: compatibility ? findings.filter(issue => issue.status === "blocked").length : "?", label: "Blocked", note: "Blocking rule findings", icon: CircleX, status: "blocked" },
-  ] : [
-    { value: data.enabledMods, label: "Enabled", note: "Current deployment", icon: CheckCircle2, status: "ready" },
-    { value: data.installedMods, label: "Installed", note: "Managed mod library", icon: Boxes, status: "unverified" },
-    { value: preflight?.issues.length ?? "?", label: "Findings", note: "Launch preflight", icon: TriangleAlert, status: "warning" },
-  ];
+    { value: compatibility ? findings.filter(issue => issue.status === "blocked").length : "?", label: "Launch blockers", note: "Blocking rule findings", icon: CircleX, status: "blocked" },
+  ] : [];
 
   return <div className="page command-center-page">
     {!hideLaunchControls && <LaunchControls status={preflight?.status ?? (canLaunch ? "unverified" : "blocked")} canLaunch={canLaunch} launching={launching} onHealth={onHealth ?? onDiagnose} onLaunchGame={onLaunchGame} onLaunchMode={onLaunchMode} onProfiles={onProfiles} />}
 
-    <header className="page-header"><div><h1>Command Center</h1></div></header>
+    <header className="page-header"><div><h1>Command Center</h1><p className="mod-summary">{data.enabledMods} enabled mods · {data.installedMods} mods in library</p></div></header>
 
     {!game.detected && <section className="callout warning" role="alert"><div><h2>{game.problemCode === "game_path_invalid" ? "Your saved game location moved" : "Locate your game installation"}</h2><p>{game.problem ?? "Automatic discovery did not find a valid Zero Company installation."}</p>{game.problemCode === "game_path_invalid" && game.path && <small className="stale-path">Saved location: <code>{game.path}</code></small>}</div><button className="primary" onClick={onLocate}>Locate game</button></section>}
     {!!existingModsFound && <section className="callout warning existing-mod-callout"><div><h2>Existing mods found</h2><p>Zero Mod Manager found {existingModsFound} unmanaged mod{existingModsFound === 1 ? "" : "s"} that can be reviewed for migration.</p></div><button onClick={onDismissExisting}>Not now</button><button className="primary" onClick={onReviewExisting}>Review existing mods</button></section>}
@@ -213,8 +208,8 @@ export function HomePage({
 
         <aside className={`system-detail ${activeSystem.status}`} aria-live="polite">
           <div className="system-detail-heading"><ActiveSystemIcon className="detail-icon" aria-hidden size={43} /><div><h2>{activeSystem.label}</h2><p>{activeSystem.metric}</p></div><span className={`system-state ${activeSystem.status}`}><i aria-hidden="true" />{statusCopy[activeSystem.status]}</span></div>
-          {activeSystem.status !== "ready" && <p className="system-summary">{activeSystem.summary}</p>}
-          <div className="system-stats">{detailStats.map(stat => <div key={stat.label} className={stat.status}><stat.icon aria-hidden size={30} /><strong>{stat.value}</strong><b>{stat.label}</b></div>)}</div>
+          <p className="system-summary">{activeSystem.summary}</p>
+          {detailStats.length > 0 && <div className="system-stats">{detailStats.map(stat => <div key={stat.label} className={stat.status}><stat.icon aria-hidden size={30} /><strong>{stat.value}</strong><b>{stat.label}</b></div>)}</div>}
           <details className="evidence-details"><summary>Technical details</summary>
           <div className="system-evidence">{evidenceRows.map(row => <div key={row.title}><FileText aria-hidden size={23} /><span><b>{row.title}</b><small>{row.detail}</small></span>{row.status === "ready" ? <CheckCircle2 className="signal-ready" aria-label="Ready" size={19} /> : row.status === "blocked" ? <CircleX className="signal-blocked" aria-label="Blocked" size={19} /> : row.status === "warning" ? <TriangleAlert className="signal-warning" aria-label="Warning" size={19} /> : <CircleHelp aria-label="Unverified" size={19} />}</div>)}</div>
           </details>
@@ -224,8 +219,8 @@ export function HomePage({
 
       <section className="command-footer" aria-label="Current deployment summary">
         <article><h3>Active profile</h3><Layers3 aria-hidden /><span><b>{profile?.name ?? "Default"}</b><em>{profile?.enabledMods ?? data.enabledMods} / {profile?.totalMods ?? data.installedMods} mods enabled</em></span><button onClick={onProfiles} disabled={!onProfiles}>Manage <ChevronRight aria-hidden size={16} /></button></article>
-        <article><h3>Latest snapshot</h3><Boxes aria-hidden /><span><b>{lastSnapshot?.label ?? "No checkpoint"}</b><em>{lastSnapshot ? formatDate(lastSnapshot.createdAt) : "Create a recovery point in Profiles"}</em></span><button onClick={onProfiles} disabled={!onProfiles}>Snapshots <ChevronRight aria-hidden size={16} /></button></article>
-        <article><h3>Recent operation</h3><Activity aria-hidden /><span><b>{lastOperation?.summary ?? "No managed operation"}</b><em>{lastOperation ? `${lastOperation.status} · ${formatDate(lastOperation.startedAt)}` : "Your managed changes will appear here"}</em></span><button onClick={() => setView("activity")}>View log <ChevronRight aria-hidden size={16} /></button></article>
+        <details className="summary-extra"><summary>Recovery and recent activity</summary><article><h3>Latest snapshot</h3><Boxes aria-hidden /><span><b>{lastSnapshot?.label ?? "No checkpoint"}</b><em>{lastSnapshot ? formatDate(lastSnapshot.createdAt) : "Create a recovery point in Profiles"}</em></span><button onClick={onProfiles} disabled={!onProfiles}>Snapshots <ChevronRight aria-hidden size={16} /></button></article>
+        <article><h3>Recent operation</h3><Activity aria-hidden /><span><b>{lastOperation?.summary ?? "No managed operation"}</b><em>{lastOperation ? `${lastOperation.status} · ${formatDate(lastOperation.startedAt)}` : "Your managed changes will appear here"}</em></span><button onClick={() => setView("activity")}>View log <ChevronRight aria-hidden size={16} /></button></article></details>
       </section>
     </>}
 
@@ -235,7 +230,7 @@ export function HomePage({
         <article><Wrench aria-hidden /><div><h3>Runtime & tools</h3><p>{ue4ss.message ?? (runtimeLoaded ? "UE4SS load evidence is available." : "Review runtime readiness before using dependent mods.")}</p></div><button onClick={onDiagnose}>Run Mod Doctor</button><button className="link-button" onClick={onGetUe4ss}><ExternalLink aria-hidden size={14} />Tested UE4SS build</button><button className="link-button" onClick={onInstallUe4ss} disabled={!game.detected || busy}><FileArchive aria-hidden size={14} />Install downloaded package</button></article>
         <article><SlidersHorizontal aria-hidden /><div><h3>Deployment access</h3></div><button onClick={onLibrary} disabled={!onLibrary}>Open Library</button><button onClick={onOpenMods}><FolderOpen aria-hidden size={16} />Open mods folder</button></article>
       </div>
-      {preflight?.issues.length ? <div className="preflight-list"><h2>Preflight findings</h2>{preflight.issues.map(issue => <article key={issue.id}><span className={`op-state ${issue.status}`}>{statusCopy[issue.status]}</span><div><b>{issue.title}</b><p>{issue.detail}</p></div></article>)}</div> : <div className="quiet-state"><ShieldCheck aria-hidden />{preflight ? "No preflight finding requires attention." : "Preflight evidence has not been loaded yet."}</div>}
+      {preflight?.issues.length ? <div className="preflight-list"><h2>Launch checks</h2>{preflight.issues.map(issue => <article key={issue.id}><span className={`op-state ${issue.status}`}>{statusCopy[issue.status]}</span><div><b>{issue.title}</b><p>{issue.detail}</p></div></article>)}</div> : <div className="quiet-state"><ShieldCheck aria-hidden />{preflight ? "No launch issues reported." : "Launch checks have not run yet."}</div>}
     </section>}
 
     {view === "activity" && <section className="activity-view">
@@ -246,7 +241,7 @@ export function HomePage({
     </div>
     <div className="command-paths">
       <button className="path-line command-path" onClick={onOpenMods}><FolderOpen aria-hidden size={15} /><span>Open mods folder</span></button>
-      {game.path && <button className="path-line command-path" onClick={onOpenGame} title="Open game folder"><Gamepad2 aria-hidden size={15} /><span>{game.path}</span></button>}
+      {game.path && <button className="path-line command-path" onClick={onOpenGame} title="Open game folder"><Gamepad2 aria-hidden size={15} /><span>Game folder</span></button>}
     </div>
   </div>;
 }

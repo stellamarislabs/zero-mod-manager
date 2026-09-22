@@ -6,7 +6,7 @@ use crate::{
     models::{
         ManifestGame, ModManifest, ModPreview, PackageAssessment, PayloadFile, StagedMod, ToolInfo,
     },
-    retoc, ue4ss,
+    ue4ss,
 };
 use naming::display_name;
 use std::{
@@ -203,6 +203,30 @@ fn config_destination(path: &Path) -> Option<PathBuf> {
 /// The readable part of a source name. Only a known archive extension is
 /// stripped, because a mod folder is regularly named with dots in it and
 /// `file_stem` would cut the name at the first one.
+fn is_supplementary_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or("");
+    matches!(
+        name,
+        "readme"
+            | "readme.md"
+            | "readme.txt"
+            | "license"
+            | "license.md"
+            | "license.txt"
+            | "copying"
+            | "copying.txt"
+            | "changelog.md"
+            | "changelog.txt"
+            | "sha256sums"
+            | "sha256sums.txt"
+            | "checksums.sha256"
+    ) || (normalized
+        .split('/')
+        .any(|part| matches!(part, "licenses" | "licences"))
+        && (name.ends_with(".txt") || name.ends_with(".md")))
+}
+
 fn source_stem(source: &Path) -> String {
     let name = file_name(source);
     match lowercase_ext(source).as_str() {
@@ -220,23 +244,6 @@ fn rel(root: &Path, path: &Path) -> Result<PathBuf> {
         .strip_prefix(root)
         .map_err(|e| AppError::Other(e.to_string()))?
         .to_path_buf())
-}
-
-fn register_package_owners(
-    owners: &mut BTreeMap<String, String>,
-    stem: &str,
-    packages: &[String],
-) -> Result<()> {
-    for package in packages {
-        if let Some(previous) = owners.insert(package.clone(), stem.to_string()) {
-            if previous != stem {
-                return Err(AppError::AlternativeIoStoreVariants(format!(
-                    "{previous} and {stem}"
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// A UE4SS mod folder: the directory UE4SS itself loads by name.
@@ -459,7 +466,7 @@ pub fn scan_staged(
 fn collect(
     source: &Path,
     root: &Path,
-    tool: &ToolInfo,
+    _tool: &ToolInfo,
     game_build: Option<&str>,
     ue4ss_ready: bool,
     show_packages: bool,
@@ -503,6 +510,7 @@ fn collect(
             mod_type: "ue4ss-runtime".into(),
             files: listed,
             warnings: warnings.clone(),
+            supplementary_files: Vec::new(),
             valid: true,
             verification: "not-required".into(),
             verification_details: None,
@@ -532,7 +540,6 @@ fn collect(
             files: Vec::new(),
             packages: Vec::new(),
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -761,16 +768,11 @@ fn collect(
             let has_iostore = groups
                 .iter()
                 .any(|(_, group)| group.contains_key("utoc") || group.contains_key("ucas"));
-            let mut packages = Vec::new();
-            let mut package_paths = Vec::new();
-            let mut verification = if has_iostore {
-                "passed".to_string()
-            } else {
-                "not-required".to_string()
-            };
-            let mut details: Option<String> = None;
+            let packages = Vec::new();
+            let package_paths = Vec::new();
+            let verification = "not-required".to_string();
+            let details: Option<String> = None;
             let mut payload = Vec::new();
-            let mut package_owners: BTreeMap<String, String> = BTreeMap::new();
             for (stem, group) in groups.iter().filter(|(_, group)| {
                 !has_iostore || group.contains_key("utoc") || group.contains_key("ucas")
             }) {
@@ -795,30 +797,6 @@ fn collect(
                             destination_relative: name,
                         });
                         claimed.insert(path.clone());
-                    }
-                }
-                let Some(utoc) = group.get("utoc") else {
-                    continue;
-                };
-                match retoc::inspect(tool, utoc) {
-                    Ok(info) => {
-                        register_package_owners(&mut package_owners, stem, &info.package_ids)?;
-                        packages.extend(info.package_ids);
-                        package_paths.extend(info.package_paths);
-                        details = Some(match details {
-                            Some(previous) => format!("{previous}\n{}", info.details),
-                            None => info.details,
-                        })
-                    }
-                    Err(AppError::RetocNotFound) => {
-                        if verification != "failed" {
-                            verification = "unavailable".into();
-                        }
-                        details = Some(AppError::RetocNotFound.to_string())
-                    }
-                    Err(error) => {
-                        verification = "failed".into();
-                        details = Some(error.to_string())
                     }
                 }
             }
@@ -961,6 +939,9 @@ fn collect(
     if buckets.is_empty() {
         return Err(AppError::ModNotRecognized);
     }
+    let (supplementary_files, ignored): (Vec<String>, Vec<String>) = ignored
+        .into_iter()
+        .partition(|path| is_supplementary_file(path));
     if !ignored.is_empty() {
         warnings.push(format!(
             "{} file{} in this archive {} not part of a recognized mod layout and will not be \
@@ -1046,7 +1027,7 @@ fn collect(
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("pak"))
             });
         let valid = match bucket.kind {
-            "iostore" => matches!(verification.as_str(), "passed" | "unavailable"),
+            "iostore" => true,
             "ue4ss" => ue4ss_ready,
             _ => true,
         };
@@ -1080,7 +1061,6 @@ fn collect(
             files: bucket.files.clone(),
             packages: bucket_packages.clone(),
             verification: verification.clone(),
-            verification_details: details.clone(),
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -1105,6 +1085,7 @@ fn collect(
                 })
                 .collect(),
             warnings: bucket_warnings,
+            supplementary_files: supplementary_files.clone(),
             valid,
             verification,
             verification_details: details,
@@ -1259,16 +1240,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overlapping_iostore_variants() {
-        let mut owners = BTreeMap::new();
-        register_package_owners(&mut owners, "FullPrice", &["package-a".into()]).unwrap();
-        assert!(matches!(
-            register_package_owners(&mut owners, "HalfPrice", &["package-a".into()]),
-            Err(AppError::AlternativeIoStoreVariants(_))
-        ));
-    }
-
-    #[test]
     fn detects_complete_iostore_triplet_without_verifier() {
         let s = tempdir().unwrap();
         let c = tempdir().unwrap();
@@ -1278,7 +1249,7 @@ mod tests {
         let (_, preview) = one(s.path(), c.path(), false);
         assert_eq!(preview.mod_type, "iostore");
         assert_eq!(preview.files.len(), 3);
-        assert_eq!(preview.verification, "unavailable");
+        assert_eq!(preview.verification, "not-required");
         assert!(preview.valid);
         assert!(preview.load_order_supported);
     }
@@ -1530,11 +1501,9 @@ mod tests {
             !warnings.iter().any(|w| w.contains("zcom-mod.json")),
             "the manager read that manifest: {warnings:?}"
         );
-        // A file it genuinely did not recognise is still reported.
-        assert!(
-            warnings.iter().any(|w| w.contains("readme.txt")),
-            "{warnings:?}"
-        );
+        // Documentation is available as neutral detail, not a warning.
+        assert!(!warnings.iter().any(|w| w.contains("readme.txt")));
+        assert_eq!(found[0].1.supplementary_files, vec!["readme.txt"]);
     }
 
     #[test]
@@ -1722,10 +1691,7 @@ mod tests {
         let Some(folder) = std::env::var_os("ZERO_MOD_MANAGER_ARCHIVES") else {
             panic!("set ZERO_MOD_MANAGER_ARCHIVES to a folder of downloaded mod archives")
         };
-        let integration_tool = std::env::var("ZERO_MOD_MANAGER_RETOC")
-            .ok()
-            .map(|path| crate::retoc::find(Some(&path)))
-            .unwrap_or_else(tool);
+        let integration_tool = tool();
         let cache = tempdir().unwrap();
         let mut seen = 0;
         let mut failures = Vec::new();
@@ -1801,11 +1767,19 @@ mod tests {
         let c = tempdir().unwrap();
         write(&s.path().join("MyMod/Scripts/main.lua"), b"return {}");
         write(&s.path().join("README.txt"), b"read me");
+        write(&s.path().join("SHA256SUMS.txt"), b"checksum");
+        write(&s.path().join("licenses/MinHook.txt"), b"license");
+        write(&s.path().join("unknown.bin"), b"payload");
         let (_, preview) = one(s.path(), c.path(), true);
-        assert!(preview
+        assert_eq!(preview.supplementary_files.len(), 3);
+        assert!(!preview
             .warnings
             .iter()
             .any(|warning| warning.contains("README.txt")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unknown.bin")));
     }
 
     /// The whole scripted path, from an archive on disk to the mod a person

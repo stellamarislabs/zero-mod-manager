@@ -781,8 +781,7 @@ mod tests {
 
     #[test]
     fn deeply_nested_members_are_rejected_before_extraction() {
-        let name = std::iter::repeat("folder")
-            .take(MAX_PATH_DEPTH + 1)
+        let name = std::iter::repeat_n("folder", MAX_PATH_DEPTH + 1)
             .collect::<Vec<_>>()
             .join("/");
         assert!(archive_relative(&format!("{name}/mod.pak")).is_none());

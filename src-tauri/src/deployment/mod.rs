@@ -68,7 +68,7 @@ pub fn sha256(path: &Path) -> Result<String> {
 /// A game-folder mod carries its own path inside the installation, because it
 /// replaces or adds files the engine reads directly, so its base is the game
 /// root itself.
-fn destination_base(game: &Path, kind: &str) -> PathBuf {
+pub(crate) fn destination_base(game: &Path, kind: &str) -> PathBuf {
     match kind {
         "ue4ss" => game.join("SWZeroCompany/Binaries/Win64/ue4ss/Mods"),
         "gamedir" => game.to_path_buf(),
@@ -117,7 +117,10 @@ fn replaces_existing(kind: &str) -> bool {
 pub(crate) fn game_is_running() -> bool {
     #[cfg(target_os = "windows")]
     {
-        return std::process::Command::new("tasklist")
+        use std::os::windows::process::CommandExt;
+        // Polling must never flash a console window over the user's desktop.
+        std::process::Command::new("tasklist")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .args([
                 "/FI",
                 "IMAGENAME eq SWZeroCompany-Win64-Shipping.exe",
@@ -129,7 +132,7 @@ pub(crate) fn game_is_running() -> bool {
                 String::from_utf8_lossy(&output.stdout)
                     .to_ascii_lowercase()
                     .contains("swzerocompany-win64-shipping.exe")
-            });
+            })
     }
     #[cfg(target_os = "linux")]
     {
@@ -197,6 +200,7 @@ fn prune_empty_dirs(game: &Path, kind: &str, removed: &[PathBuf]) {
 }
 
 fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
+    crate::package_transaction::protect_file(destination)?;
     if destination.exists() {
         return Err(AppError::DeploymentConflict(destination.to_path_buf()));
     }
@@ -205,6 +209,7 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
         .ok_or_else(|| AppError::Other("invalid deployment path".into()))?;
     fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".zcom-stage-{}", Uuid::new_v4()));
+    crate::package_transaction::protect_file(&temp)?;
     fs::copy(source, &temp)?;
     if let Err(e) = fs::rename(&temp, destination) {
         let _ = fs::remove_file(temp);
@@ -221,6 +226,8 @@ fn copy_atomic(source: &Path, destination: &Path) -> Result<()> {
 /// fails without moving anything, so an upgrade of a mod installed on another
 /// drive would abort before it started.
 fn move_file(from: &Path, to: &Path) -> Result<()> {
+    crate::package_transaction::protect_file(from)?;
+    crate::package_transaction::protect_file(to)?;
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -247,6 +254,7 @@ fn take_backup(
     relative: &Path,
     destination: &Path,
 ) -> Result<(String, String)> {
+    crate::package_transaction::protect_file(destination)?;
     let hash = sha256(destination)?;
     let target = backup_root(library, id).join(relative);
     if let Some(parent) = target.parent() {
@@ -267,6 +275,7 @@ fn restore_backups(conn: &Connection, library: &Path, id: &str) -> Result<()> {
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
         }
+        crate::package_transaction::protect_file(&destination)?;
         fs::copy(&source, &destination)?;
     }
     Ok(())
@@ -386,6 +395,7 @@ fn install_over(
         }
     }
     let mod_library = library.join(&id);
+    crate::package_transaction::protect_tree(&mod_library)?;
     let payload_root = mod_library.join("payload");
     fs::create_dir_all(&payload_root)?;
     for file in &staged.files {
@@ -551,6 +561,10 @@ pub fn replace(
 ) -> Result<ModSummary> {
     guard_config_write(&staged.mod_type)?;
     let old = database::mod_record(conn, old_id)?;
+    let old_bundle = database::list_mods(conn)?
+        .into_iter()
+        .find(|item| item.id == old_id)
+        .and_then(|item| item.bundle_id);
     let old_files = database::file_records(conn, old_id)?;
     let old_backups = database::backups(conn, old_id)?;
     if old.enabled && !force {
@@ -561,7 +575,9 @@ pub fn replace(
             }
         }
     }
+    crate::package_transaction::protect_tree(&library.join(old_id))?;
     let aside = library.join(format!(".replacing-{old_id}"));
+    crate::package_transaction::protect_tree(&aside)?;
     let _ = fs::remove_dir_all(&aside);
     fs::create_dir_all(&aside)?;
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -586,7 +602,7 @@ pub fn replace(
         moved.push((original, held));
     }
     let installed = install_over(conn, library, game, staged, build, Some(old_id));
-    let summary = match installed {
+    let mut summary = match installed {
         Ok(summary) => summary,
         Err(error) => {
             restore(&moved);
@@ -597,6 +613,10 @@ pub fn replace(
     // From here the replacement owns the destinations, so the old entry goes.
     let carried = (|| -> Result<()> {
         let tx = conn.transaction()?;
+        if let Some(bundle) = &old_bundle {
+            database::set_bundle_id(&tx, &summary.id, bundle)?;
+            summary.bundle_id = Some(bundle.clone());
+        }
         for (destination, relative, hash) in &old_backups {
             let source = backup_root(library, old_id).join(relative);
             let target = backup_root(library, &summary.id).join(relative);
@@ -655,6 +675,7 @@ pub fn set_enabled(
 ) -> Result<()> {
     let record = database::mod_record(conn, id)?;
     guard_config_write(&record.mod_type)?;
+    crate::package_transaction::protect_tree(&library.join(id))?;
     if record.enabled == enabled {
         return Ok(());
     }
@@ -684,7 +705,10 @@ pub fn set_enabled(
                 let recorded = database::backup_for(conn, id, destination)?;
                 let current = sha256(&target)?;
                 match recorded {
-                    Some((_, stored)) if stored == current => fs::remove_file(&target)?,
+                    Some((_, stored)) if stored == current => {
+                        crate::package_transaction::protect_file(&target)?;
+                        fs::remove_file(&target)?;
+                    }
                     _ => {
                         let (relative, hash) = take_backup(library, id, Path::new(lib), &target)?;
                         database::record_backup(conn, id, destination, &relative, &hash)?;
@@ -716,6 +740,7 @@ pub fn set_enabled(
         for (_, destination, _, _) in &records {
             let path = PathBuf::from(destination);
             if path.exists() {
+                crate::package_transaction::protect_file(&path)?;
                 fs::remove_file(&path)?;
                 removed.push(path);
             }
@@ -727,6 +752,22 @@ pub fn set_enabled(
         }
     }
     database::set_enabled(conn, id, enabled)
+}
+
+/// Check the whole selection before removing the first component. Changed
+/// active files are never implicitly forced by a package-level action.
+pub fn validate_removal(conn: &Connection, ids: &[String]) -> Result<()> {
+    ensure_game_stopped()?;
+    for id in ids {
+        let record = database::mod_record(conn, id)?;
+        for (_, destination, _, expected) in database::file_records(conn, id)? {
+            let path = PathBuf::from(destination);
+            if record.enabled && path.exists() && sha256(&path)? != expected {
+                return Err(AppError::ChecksumMismatch(path));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn uninstall(
@@ -754,9 +795,15 @@ pub fn uninstall(
             return Err(AppError::ChecksumMismatch(path));
         }
         if matches || (record.enabled && force) {
-            fs::remove_file(&path)?;
             removed.push(path);
         }
+    }
+    // Validate every payload before deleting any: a later checksum mismatch
+    // must not leave an otherwise intact mod partially removed.
+    crate::package_transaction::protect_tree(&library.join(id))?;
+    for path in &removed {
+        crate::package_transaction::protect_file(path)?;
+        fs::remove_file(path)?;
     }
     if record.enabled {
         restore_backups(conn, library, id)?;
@@ -832,7 +879,6 @@ mod tests {
             }],
             packages: vec![],
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         }
@@ -971,7 +1017,6 @@ mod tests {
             }],
             packages: vec![],
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         }
@@ -1019,6 +1064,35 @@ mod tests {
         uninstall(&c, &l, &m.id, false, Some(&g)).unwrap();
         assert!(folder.join("Scripts/settings.lua").exists());
         assert!(!folder.join("Scripts/main.lua").exists());
+    }
+
+    #[test]
+    fn uninstall_checks_all_payloads_before_removing_any() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        let mut payload = staged(d.path());
+        let extra = d.path().join("ZExtra_P.pak");
+        fs::write(&extra, b"extra").unwrap();
+        payload.files.push(PayloadFile {
+            source: extra,
+            library_relative: "ZExtra_P.pak".into(),
+            destination_relative: "ZExtra_P.pak".into(),
+        });
+        let m = install(&mut c, &l, &g, &payload, None).unwrap();
+        let records = database::file_records(&c, &m.id).unwrap();
+        assert_eq!(records.len(), 2);
+        fs::write(&records[1].1, b"changed").unwrap();
+        assert!(matches!(
+            uninstall(&c, &l, &m.id, false, Some(&g)),
+            Err(AppError::ChecksumMismatch(_))
+        ));
+        assert!(Path::new(&records[0].1).exists());
+        assert!(Path::new(&records[1].1).exists());
+        assert!(database::mod_record(&c, &m.id).is_ok());
     }
 
     #[test]
@@ -1164,8 +1238,15 @@ mod tests {
         second.files[0].library_relative = "Second_P.pak".into();
         second.files[0].destination_relative = "Second_P.pak".into();
 
-        let installed =
-            install_bundle(&mut c, &l, &g, &[first, second], None, "bundle-test").unwrap();
+        let installed = install_bundle(
+            &mut c,
+            &l,
+            &g,
+            &[first.clone(), second],
+            None,
+            "bundle-test",
+        )
+        .unwrap();
 
         assert_eq!(installed.len(), 2);
         assert!(installed
@@ -1175,6 +1256,112 @@ mod tests {
             .unwrap()
             .iter()
             .all(|component| component.bundle_id.as_deref() == Some("bundle-test")));
+    }
+
+    #[test]
+    fn component_update_keeps_bundle_and_removal_preflights_all_members() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        let mut c = database::open(&d.path().join("db")).unwrap();
+        fs::create_dir_all(d.path().join("second")).unwrap();
+        let first = staged(d.path());
+        let mut second = staged(&d.path().join("second"));
+        second.staging_id = "second".into();
+        second.files[0].library_relative = "Second_P.pak".into();
+        second.files[0].destination_relative = "Second_P.pak".into();
+        let installed = install_bundle(
+            &mut c,
+            &l,
+            &g,
+            &[first.clone(), second],
+            None,
+            "bundle-test",
+        )
+        .unwrap();
+        let mut newer = first.clone();
+        newer.source_archive = "new-version.zip".into();
+        let updated = replace(&mut c, &l, &g, &installed[0].id, &newer, None, false).unwrap();
+        assert_eq!(updated.bundle_id.as_deref(), Some("bundle-test"));
+        assert_eq!(database::counts(&c).unwrap().0, 1);
+        let ids = vec![updated.id.clone(), installed[1].id.clone()];
+        let second_file = database::file_records(&c, &ids[1]).unwrap()[0].1.clone();
+        let original = fs::read(&second_file).unwrap();
+        fs::write(&second_file, b"user edit").unwrap();
+        assert!(validate_removal(&c, &ids).is_err());
+        assert_eq!(database::list_mods(&c).unwrap().len(), 2);
+        assert!(Path::new(&database::file_records(&c, &ids[0]).unwrap()[0].1).exists());
+        fs::write(&second_file, original).unwrap();
+        validate_removal(&c, &ids).unwrap();
+        for id in &ids {
+            uninstall(&c, &l, id, false, Some(&g)).unwrap();
+        }
+        assert!(database::list_mods(&c).unwrap().is_empty());
+        assert!(!Path::new(&second_file).exists());
+        assert!(ids.iter().all(|id| !l.join(id).exists()));
+    }
+
+    #[test]
+    fn package_update_retires_old_components_and_rolls_back_late_failure() {
+        let d = tempdir().unwrap();
+        let g = d.path().join("game");
+        let l = d.path().join("library");
+        let data = d.path().join("data");
+        game(&g);
+        fs::create_dir_all(&l).unwrap();
+        fs::create_dir_all(&data).unwrap();
+        let mut c = database::open(&data.join("db.sqlite")).unwrap();
+        fs::create_dir_all(d.path().join("second")).unwrap();
+        let first = staged(d.path());
+        let mut second = staged(&d.path().join("second"));
+        second.files[0].library_relative = "Retired_P.pak".into();
+        second.files[0].destination_relative = "Retired_P.pak".into();
+        let old =
+            install_bundle(&mut c, &l, &g, &[first.clone(), second], None, "package").unwrap();
+        let profile = crate::profiles::create(&c, "Test profile", "").unwrap();
+        let mut newer = first.clone();
+        newer.version = Some("2".into());
+        fs::write(&newer.files[0].source, b"new version").unwrap();
+        let matched = vec![Some(old[0].id.clone())];
+        let failed: Result<()> = crate::package_transaction::run(&mut c, &data, &l, &g, |conn| {
+            crate::packages::deploy(
+                conn,
+                &l,
+                &g,
+                &[newer.clone()],
+                &old,
+                &matched,
+                None,
+                "package",
+            )?;
+            crate::load_order::apply_ue4ss_order(conn, &g, &[])?;
+            Err(AppError::Other("injected metadata failure".into()))
+        });
+        assert!(failed.unwrap_err().to_string().contains("restored"));
+        assert_eq!(database::list_mods(&c).unwrap().len(), 2);
+        assert_eq!(fs::read(&old[0].files[0].destination).unwrap(), b"original");
+        assert!(Path::new(&old[1].files[0].destination).exists());
+        let updated = crate::package_transaction::run(&mut c, &data, &l, &g, |conn| {
+            crate::packages::deploy(conn, &l, &g, &[newer], &old, &matched, None, "package")
+        })
+        .unwrap();
+        assert_eq!(database::list_mods(&c).unwrap().len(), 1);
+        assert_eq!(
+            fs::read(&updated[0].files[0].destination).unwrap(),
+            b"new version"
+        );
+        assert!(!Path::new(&old[1].files[0].destination).exists());
+        let saved = crate::profiles::detail(&c, &profile.summary.id).unwrap();
+        assert_eq!(saved.mods.len(), 1);
+        assert_eq!(saved.mods[0].mod_id, updated[0].id);
+        crate::package_transaction::run(&mut c, &data, &l, &g, |conn| {
+            uninstall(conn, &l, &updated[0].id, false, Some(&g))
+        })
+        .unwrap();
+        assert!(database::list_mods(&c).unwrap().is_empty());
+        assert!(!Path::new(&updated[0].files[0].destination).exists());
     }
 
     fn gamedir(root: &Path, relative: &str, body: &[u8]) -> StagedMod {
@@ -1198,7 +1385,6 @@ mod tests {
             }],
             packages: vec![],
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         }
@@ -1325,7 +1511,6 @@ mod tests {
                 .collect(),
             packages: vec![],
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -1367,7 +1552,6 @@ mod tests {
             }],
             packages: vec![],
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         }

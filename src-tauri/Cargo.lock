@@ -5980,7 +5980,7 @@ dependencies = [
 
 [[package]]
 name = "zero-mod-manager"
-version = "0.7.0-rc.1"
+version = "0.7.0-rc.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5992,6 +5992,7 @@ dependencies = [
  "reqwest",
  "roxmltree",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -6005,6 +6006,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

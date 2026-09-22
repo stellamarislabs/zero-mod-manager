@@ -7,7 +7,6 @@ use crate::{
         ModFile, ModManifest, ModSummary, ToolInfo,
     },
     mods::naming::display_name,
-    retoc,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -150,15 +149,7 @@ fn candidate(spec: CandidateSpec<'_>) -> CandidateSnapshot {
         .collect();
     CandidateSnapshot {
         public: ExistingModCandidate {
-            container_verification: (spec.mod_type == "iostore").then(|| {
-                if spec.warnings.contains(&AppError::RetocNotFound.to_string()) {
-                    "unavailable".into()
-                } else if adoptable {
-                    "passed".into()
-                } else {
-                    "failed".into()
-                }
-            }),
+            container_verification: None,
             id,
             name: spec.name,
             version: spec.version,
@@ -201,7 +192,7 @@ fn logical_packaged_name(path: &Path) -> PathBuf {
 fn scan_packaged(
     conn: &Connection,
     game: &Path,
-    tool: &ToolInfo,
+    _tool: &ToolInfo,
     owned: &HashSet<String>,
 ) -> Result<Vec<CandidateSnapshot>> {
     let root = game.join(PACKAGED_ROOT);
@@ -242,7 +233,7 @@ fn scan_packaged(
             .collect::<BTreeSet<_>>();
         let duplicate_extensions = extensions.len() != paths.len();
         let iostore = extensions.contains("utoc") || extensions.contains("ucas");
-        let mut blocked = if owned_count > 0 {
+        let blocked = if owned_count > 0 {
             Some(
                 "Some files in this container family are already managed by Zero Mod Manager."
                     .into(),
@@ -259,20 +250,8 @@ fn scan_packaged(
         } else {
             None
         };
-        let mut packages = Vec::new();
-        let mut warnings = Vec::new();
-        if iostore && blocked.is_none() {
-            let utoc = paths
-                .iter()
-                .find(|(path, _)| lower_extension(path) == "utoc")
-                .map(|(path, _)| path.as_path())
-                .expect("complete IoStore candidate has a UTOC");
-            match retoc::inspect(tool, utoc) {
-                Ok(inspection) => packages = inspection.package_ids,
-                Err(AppError::RetocNotFound) => warnings.push(AppError::RetocNotFound.to_string()),
-                Err(error) => blocked = Some(error.to_string()),
-            }
-        }
+        let packages = Vec::new();
+        let warnings = Vec::new();
         let mut snapshots = Vec::new();
         for (path, _) in &paths {
             snapshots.push(metadata_snapshot(path, logical_packaged_name(path))?);
@@ -648,15 +627,6 @@ fn adopt_group(
                 .unwrap_or_else(|| "That candidate cannot be adopted safely.".into()),
         ));
     }
-    if candidates
-        .iter()
-        .any(|item| item.public.container_verification.as_deref() == Some("unavailable"))
-        && !group.allow_unverified
-    {
-        return Err(AppError::Other(
-            "Confirm adoption without container verification to continue.".into(),
-        ));
-    }
     let packaged = candidates
         .iter()
         .all(|item| matches!(item.public.mod_type.as_str(), "pak" | "iostore"));
@@ -777,16 +747,7 @@ fn adopt_group(
         .flat_map(|item| item.deployment_keys.clone())
         .collect::<Vec<_>>();
     let summary = ModSummary {
-        container_verification: (mod_type == "iostore").then(|| {
-            if candidates
-                .iter()
-                .any(|item| item.public.container_verification.as_deref() == Some("unavailable"))
-            {
-                "unavailable".into()
-            } else {
-                "passed".into()
-            }
-        }),
+        container_verification: None,
         id: id.clone(),
         bundle_id: None,
         name,

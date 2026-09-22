@@ -26,3 +26,13 @@ Colors come from styles.css tokens: surface, surface-soft, outline, text, muted 
 
 ## Verification
 Test navigation without replacing sidebar/toolbar nodes, and compare their bounding boxes between Home, Settings and About in a real browser. Check 1440 x 900 and 760 x 600, scrolling, keyboard selection, launch guards and unknown-data states. QA fixture data is synthetic and must not be presented as real game evidence.
+## Application icon
+The sidebar and packaged application share src/assets/icon.svg as their source.
+Run npm run icons:generate after changing it to refresh src-tauri/icons,
+including Windows EXE/NSIS ICO resources. Do not maintain a separate legacy logo.
+
+### September 2026 palette refinement
+
+Use lighter, blue-tinted shared surfaces inspired by the holotable, without a decorative map. Command Center and utility pages share the same tokens and fixed shell. Destructive cleanup uses a red border, explicit consequence text, Cancel-first focus and a required acknowledgement; color is never the only warning.
+### Compact library and overview
+Library cleanup must have at least 16px separation from tabs, including when expanded. The default-on UE4SS component filter affects visibility only and uses known deployed folder names, never user-editable titles. Narrow tables keep state, name, health and primary actions; secondary actions stay in mod details. Command Center labels counts as mods and keeps recovery/history details collapsed. Do not hide blocking issues to reduce scrolling.

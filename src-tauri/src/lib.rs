@@ -10,13 +10,15 @@ mod diagnostics;
 mod error;
 mod fomod;
 mod isolation;
+mod launcher;
 mod load_order;
 mod migration;
 mod models;
 mod mods;
 mod operations;
+mod package_transaction;
+mod packages;
 mod profiles;
-mod retoc;
 mod sessions;
 mod steam;
 mod storage;
@@ -110,6 +112,20 @@ pub fn run() {
                     "pre_0_7_backup_completed",
                     &backup.display().to_string(),
                 );
+            }
+            // Recover package files and SQLite together before migrations or
+            // the independent load-order journal can observe partial state.
+            {
+                let mut recovery = rusqlite::Connection::open(&db_path)?;
+                if package_transaction::recover(&mut recovery, &data_dir)
+                    .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?
+                {
+                    bootstrap_log(
+                        &logs_dir,
+                        "package_recovered",
+                        "Previous package state restored; recovery copies retained.",
+                    );
+                }
             }
             let mut conn = database::open(&db_path)
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
@@ -241,6 +257,7 @@ pub fn run() {
             commands::set_mod_enabled,
             commands::set_mod_hidden,
             commands::uninstall_mod,
+            commands::uninstall_bundle,
             commands::verify_mod,
             commands::install_ue4ss,
             commands::get_links,

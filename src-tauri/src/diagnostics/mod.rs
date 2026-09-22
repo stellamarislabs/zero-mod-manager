@@ -23,7 +23,7 @@ pub fn run(
     conn: &Connection,
     game: &GameInfo,
     ue4ss: &Ue4ssInfo,
-    retoc: &ToolInfo,
+    _tool: &ToolInfo,
 ) -> Result<DiagnosticReport> {
     let mods = database::list_mods(conn)?;
     let conflicts = database::conflict_count(conn)?;
@@ -82,7 +82,6 @@ pub fn run(
         None,
     ));
     items.push(item("Package conflicts",if conflicts==0{"good"}else{"warning"},format!("{conflicts} overlapping file/package group(s)"),(conflicts>0).then(||"Open Mods to review the affected managers. Raw package names remain hidden by default.".into())));
-    items.push(item("retoc",if retoc.found{"good"}else{"warning"},retoc.version.clone().unwrap_or_else(||"Not configured".into()),(!retoc.found).then(||"Optional: configure retoc for container checks, or accept the unverified-install warning.".into())));
     // A complete layout is not a loaded runtime. Reporting "Healthy" from file
     // presence alone told a user whose game never loaded UE4SS that nothing was
     // wrong, so the verdict now waits for the log UE4SS writes when it runs.

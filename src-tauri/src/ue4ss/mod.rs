@@ -353,6 +353,7 @@ pub fn write_order(game: &Path, ordered: &[(String, bool)]) -> Result<()> {
     if !value.is_empty() {
         value.push_str(line_ending)
     }
+    crate::package_transaction::protect_file(&path)?;
     fs::write(path, value)?;
     Ok(())
 }
@@ -404,6 +405,7 @@ pub fn update_mods_txt(game: &Path, name: &str, enabled: bool) -> Result<()> {
     if !value.is_empty() {
         value.push_str(line_ending)
     }
+    crate::package_transaction::protect_file(&path)?;
     fs::write(path, value)?;
     Ok(())
 }

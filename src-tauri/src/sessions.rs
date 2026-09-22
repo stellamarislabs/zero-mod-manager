@@ -144,9 +144,9 @@ pub fn preflight(
         "blocked"
     } else if issues.iter().any(|issue| issue.status == "warning") {
         "warning"
-    } else if issues.iter().any(|issue| issue.status == "unverified") {
-        "unverified"
-    } else if ue4ss.installed && !ue4ss.log_found {
+    } else if issues.iter().any(|issue| issue.status == "unverified")
+        || (ue4ss.installed && !ue4ss.log_found)
+    {
         "unverified"
     } else {
         "ready"

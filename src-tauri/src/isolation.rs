@@ -197,7 +197,7 @@ pub fn advance(conn: &Connection, id: &str, outcome: &str) -> Result<IsolationSe
         }
         "runtime" => {
             session.phase = "bisect".into();
-            let take = (session.candidate_groups.len() + 1) / 2;
+            let take = session.candidate_groups.len().div_ceil(2);
             session.current_mod_ids = session
                 .candidate_groups
                 .iter()
@@ -225,7 +225,7 @@ pub fn advance(conn: &Connection, id: &str, outcome: &str) -> Result<IsolationSe
                 session.status = "completed".into();
                 session.current_mod_ids.clear();
             } else {
-                let take = (session.candidate_groups.len() + 1) / 2;
+                let take = session.candidate_groups.len().div_ceil(2);
                 session.current_mod_ids = session
                     .candidate_groups
                     .iter()

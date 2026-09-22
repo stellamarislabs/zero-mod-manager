@@ -599,6 +599,12 @@ pub fn apply(
             expected: update.expected.clone(),
         })
         .collect::<Vec<_>>();
+    crate::package_transaction::protect_file(journal_path)?;
+    for item in &moves {
+        crate::package_transaction::protect_file(&item.old)?;
+        crate::package_transaction::protect_file(&item.temporary)?;
+        crate::package_transaction::protect_file(&item.new)?;
+    }
     if !moves.is_empty() {
         fs::write(
             journal_path,
@@ -720,7 +726,6 @@ mod tests {
             files,
             packages: packages.iter().map(|value| (*value).into()).collect(),
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         }
@@ -1068,7 +1073,6 @@ mod tests {
     #[test]
     #[ignore = "requires a local, redistributable IoStore test triplet"]
     fn renamed_iostore_fixture_remains_verifiable() {
-        use std::process::Command;
         let source = PathBuf::from(
             std::env::var("ZCOM_LOAD_ORDER_FIXTURE")
                 .expect("set ZCOM_LOAD_ORDER_FIXTURE to a .utoc"),
@@ -1092,11 +1096,6 @@ mod tests {
             }
         }
         let renamed = directory.path().join(format!("{target_stem}.utoc"));
-        let status = Command::new(std::env::var("RETOC_SOURCE").unwrap_or_else(|_| "retoc".into()))
-            .arg("verify")
-            .arg(renamed)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        assert_eq!(fs::read(&source).unwrap(), fs::read(&renamed).unwrap());
     }
 }

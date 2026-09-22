@@ -16,12 +16,6 @@ pub enum AppError {
     UnsafeArchive(String),
     #[error("The mod is incomplete. Missing: {0}")]
     MissingIoStoreComponent(String),
-    #[error("This archive contains overlapping IoStore containers that appear to be alternative variants: {0}. Extract it and install only one variant.")]
-    AlternativeIoStoreVariants(String),
-    #[error("IoStore validation failed: {0}")]
-    RetocVerificationFailed(String),
-    #[error("Optional retoc is not available. Container integrity and package overlaps have not been verified.")]
-    RetocNotFound,
     #[error("UE4SS is not installed or its layout is incomplete.")]
     Ue4ssNotFound,
     #[error("That archive does not contain a UE4SS runtime. Expected dwmapi.dll next to a ue4ss folder.")]

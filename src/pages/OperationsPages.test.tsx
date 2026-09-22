@@ -16,6 +16,23 @@ const profile: ProfileDetail = {
 };
 
 describe("operational pages", () => {
+  it("confirms inactive profile deletion and protects the active profile", async () => {
+    const onDelete = vi.fn();
+    const props = { profiles:[profile], selected:profile, preview:null, snapshots:[], busy:false, onSelect:vi.fn(), onCreate:vi.fn(), onSave:vi.fn(), onDelete, onSetMod:vi.fn(), onPreview:vi.fn(), onActivate:vi.fn(), onExport:vi.fn(), onImport:vi.fn(), onSnapshot:vi.fn(), onRestoreSnapshot:vi.fn() };
+    const { rerender } = render(<ProfilesPage {...props} />);
+    expect((screen.getByRole("button", { name:"Delete profile" }) as HTMLButtonElement).disabled).toBe(true);
+    rerender(<ProfilesPage {...props} selected={{...profile, active:false}} />);
+    await userEvent.click(screen.getByRole("button", { name:"Delete profile" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name:"Cancel" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name:"Delete profile" }));
+    await userEvent.click(screen.getByRole("checkbox", { name:/saved profile will be deleted/ }));
+    const buttons = screen.getAllByRole("button", { name:"Delete profile" });
+    await userEvent.click(buttons[buttons.length - 1]);
+    expect(onDelete).toHaveBeenCalledOnce();
+  });
+
   it("previews a profile switch and exposes checkpoint restoration", async () => {
     const onPreview = vi.fn();
     const onRestore = vi.fn();

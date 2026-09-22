@@ -1,4 +1,4 @@
-# Zero Mod Manager — 0.7.0-rc.1
+# Zero Mod Manager — 0.7.0-rc.2
 
 **Release candidate / opt-in testing. Windows x64. Not a Stable release.**
 
@@ -29,9 +29,8 @@ server or development tools are needed. See PORTABLE-DATA.md for optional
 self-contained storage. Keep backups of an existing managed library before migration.
 
 ZIP extraction is built in. 7z/RAR archives require a compatible host extractor.
-UE4SS-based mods need their appropriate runtime. retoc is optional: without it,
-IoStore installation requires confirmation and stays Unverified. Container
-integrity and package overlap are not checked. Failed retoc checks cannot be bypassed.
+UE4SS-based mods need their appropriate runtime. IoStore companion files are checked,
+but container contents and asset-level overlaps are not inspected. No separate container tool is needed.
 
 ## Testing and limitations
 

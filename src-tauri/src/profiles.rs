@@ -32,8 +32,8 @@ fn validate_name(name: &str) -> Result<String> {
 pub fn list(conn: &Connection) -> Result<Vec<ProfileSummary>> {
     let mut statement = conn.prepare(
         "SELECT p.id,p.name,p.notes,p.required_runtime,p.created_at,p.updated_at,p.is_active,
-                coalesce(sum(CASE WHEN pm.enabled=1 THEN 1 ELSE 0 END),0),count(pm.mod_id)
-         FROM profiles p LEFT JOIN profile_mods pm ON pm.profile_id=p.id
+                count(DISTINCT CASE WHEN pm.enabled=1 THEN COALESCE(m.bundle_id, CASE WHEN lower(m.source_archive) LIKE '%.zip' OR lower(m.source_archive) LIKE '%.7z' OR lower(m.source_archive) LIKE '%.rar' THEN 'archive:' || m.source_archive END, pm.mod_id) END),count(DISTINCT COALESCE(m.bundle_id, CASE WHEN lower(m.source_archive) LIKE '%.zip' OR lower(m.source_archive) LIKE '%.7z' OR lower(m.source_archive) LIKE '%.rar' THEN 'archive:' || m.source_archive END, pm.mod_id))
+         FROM profiles p LEFT JOIN profile_mods pm ON pm.profile_id=p.id LEFT JOIN mods m ON m.id=pm.mod_id
          GROUP BY p.id ORDER BY p.is_active DESC,lower(p.name),p.created_at",
     )?;
     let rows = statement
@@ -150,6 +150,9 @@ pub fn update(
 }
 
 pub fn remove(conn: &Connection, profile_id: &str) -> Result<()> {
+    if database::get_setting(conn, "pending_restore_profile")?.as_deref() == Some(profile_id) {
+        return Err(AppError::Other("This profile is needed to recover a temporary launch. Complete recovery before deleting it.".into()));
+    }
     let active: bool = conn
         .query_row(
             "SELECT is_active FROM profiles WHERE id=?1",
@@ -553,6 +556,21 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "Default");
         assert!(profiles[0].active);
+    }
+
+    #[test]
+    fn removal_preserves_active_and_recovery_profiles() {
+        let dir = tempdir().unwrap();
+        let conn = database::open(&dir.path().join("profiles.sqlite3")).unwrap();
+        let current = active(&conn).unwrap().unwrap();
+        assert!(remove(&conn, &current.summary.id).is_err());
+        let other = create(&conn, "Other", "").unwrap();
+        database::set_setting(&conn, "pending_restore_profile", &other.summary.id).unwrap();
+        assert!(remove(&conn, &other.summary.id).is_err());
+        assert!(detail(&conn, &other.summary.id).is_ok());
+        database::delete_setting(&conn, "pending_restore_profile").unwrap();
+        remove(&conn, &other.summary.id).unwrap();
+        assert_eq!(list(&conn).unwrap().len(), 1);
     }
 
     #[test]

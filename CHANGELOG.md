@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.7.0-rc.2 — Package recovery and release hardening
+
+- Complete package updates now show replacement confirmation and retire components omitted from the new archive. An explicit target selector supports renamed packages.
+- Package installation, updates and removal use a persistent file/SQLite rollback journal. Managed single-mod installs, replacement, enable/disable and removal also use it. Startup restores an interrupted operation before normal database initialization.
+- Recovery copies are checksum-validated before restoration; interrupted files are retained locally for investigation. No game saves are collected.
+- Existing profile memberships and disabled state survive matched component upgrades.
+- GitHub update checks distinguish no public release from network errors, compare RC/stable versions correctly and let RC builds see published prereleases.
+- Local Clippy, formatting and production dependency checks are now part of the handoff.
+
+### Historical implementation notes (superseded where noted above)
+
+### Package-level library actions
+
+- Bundle rows keep the Library action layout, with package-wide enable/disable, verification, visibility and one-confirmation removal. Components remain available in a right-side drawer.
+- Removal preflights every component for changed active files before deleting any. RC2 adds persistent rollback for complete-package removal.
+- Individual component upgrades preserve package identity. RC2 additionally supports confirmed complete-package replacement and retirement of omitted components.
+
+### Custom executable administrator approval
+
+- Custom game launches request the standard Windows UAC prompt only when Windows requires elevation (error 740). Only the selected executable is elevated; the manager stays unchanged.
+- Declining approval cancels the launch without retries and returns through the existing temporary-profile recovery flow.
+- Other launch errors do not request administrator access.
+
+### Container-tool removal and bundled library
+
+- Removed external container verification, its tool settings, install/adoption prompts and health warnings. Archive safety, companion-file checks and managed-file checksum protection remain.
+- Library groups components by bundle identity or the exact original archive; bundle drawers expose individual component controls. Mod counts now count groups, not components.
+- Asset-level conflicts inside newly installed containers are no longer inspected.
+
+### Installation review noise reduction
+
+- Documentation, checksum lists and license text excluded from deployment are now neutral advanced details, not warnings.
+- Unknown payloads, native code, missing runtime, failed validation and compatibility warnings remain visible.
+- Moved non-actionable container/package metadata into advanced details.
+
+### Library clarity and compact layouts
+
+- Separated cleanup controls from navigation and removed negative tab spacing.
+- Added a default-on, view-only filter for known bundled UE4SS component folders.
+- Clarified mod totals, reduced repeated technical metrics, and collapsed secondary overview details.
+- Adapted the library table for narrow windows; secondary file actions remain available in mod details.
+- Shortened update error messages while retaining diagnostic detail in About.
+
+### Library and launch safety polish
+
+- Added selected-mod removal and temporary installation cleanup with explicit, destructive confirmation and acknowledgement.
+- Added a short Continue/Cancel explanation before Troubleshoot launches.
+- Made profile deletion discoverable; active and launch-recovery profiles cannot be deleted.
+- Lightened shared blue surfaces across pages while preserving the fixed navigation and launch bar.
+
+
+### Troubleshoot launch hotfix
+
+- Hide the Windows tasklist console during game-process polling.
+- Reject missing/empty executables before requesting launch or changing a temporary profile.
+- Preserve the pending profile recovery record if restoration fails.
+
 ### Local-first workflow update
 
 - Removed Discover, Nexus API/account integration, mod update queries and nxm download handling. Manual archives and external Nexus links remain.

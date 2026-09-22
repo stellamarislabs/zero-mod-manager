@@ -1,4 +1,7 @@
 fn main() {
+    // Recompile Windows resources whenever the shared branding changes.
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    println!("cargo:rerun-if-changed=icons/icon.png");
     for key in [
         "ZERO_MOD_MANAGER_PROJECT_URL",
         "ZERO_MOD_MANAGER_RELEASE_API",

@@ -2,7 +2,7 @@
 
 ## Current release candidate
 
-The local 0.7.0-rc.1 Windows EXE and installer are **not Authenticode-signed**.
+The local 0.7.0-rc.2 Windows EXE and installer are **not Authenticode-signed**.
 A detached signature is not supplied for these local RC artifacts either.
 Do not describe them as signed, Microsoft-approved, malware-free, or Stable.
 
@@ -20,9 +20,9 @@ Download the package and SHA256SUMS from the same maintainer release page.
 In the download directory, run:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.1_x64-portable.zip'
-Get-FileHash -Algorithm SHA256 -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.1_x64-setup.exe'
-Get-AuthenticodeSignature -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.1_x64-setup.exe' | Select-Object Status, StatusMessage
+Get-FileHash -Algorithm SHA256 -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.2_x64-portable.zip'
+Get-FileHash -Algorithm SHA256 -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.2_x64-setup.exe'
+Get-AuthenticodeSignature -LiteralPath '.\Zero.Mod.Manager_0.7.0-rc.2_x64-setup.exe' | Select-Object Status, StatusMessage
 ```
 
 Run the hash command only for the package you downloaded. Compare the complete

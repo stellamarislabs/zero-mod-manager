@@ -13,6 +13,7 @@ import { useSubscription } from "./hooks/useSubscription";
 import { HomePage } from "./pages/HomePage";
 import { HealthPage } from "./pages/HealthPage";
 import { ProfilesPage } from "./pages/ProfilesPage";
+import { groupMods } from "./utils/modGroups";
 import { InstallPage } from "./pages/InstallPage";
 import { ModsPage } from "./pages/ModsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -20,7 +21,7 @@ import { AboutPage } from "./pages/AboutPage";
 import { backend, friendlyError, isChangedFileError } from "./services/backend";
 import type { AdoptionGroup, AdoptionReport, AppSettings, CompatibilityReport, ConfigChangePreview, ConfigDocument, ConfigPatchRecord, Dashboard, DiagnosticReport, ExistingModScan, FomodAnswer, FomodSession, IsolationSession, LaunchMode, LaunchPreflight, LaunchSession, LegacyImportStatus, Links, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo, ModPreview, ModSummary, OperationRecord, PackageAssessment, ProfileDetail, ProfileSummary, ProfileSwitchPreview, SnapshotSummary, SupportBundlePreview, ToolInfo, UpdateInfo } from "./types";
 
-const defaultSettings: AppSettings = { gamePath: null, customExecutablePath: null, retocPath: null, sevenZipPath: null, logLevel: "normal", advancedPackageNames: false, reducedMotion: false };
+const defaultSettings: AppSettings = { gamePath: null, customExecutablePath: null, sevenZipPath: null, logLevel: "normal", advancedPackageNames: false, reducedMotion: false };
 const defaultLinks: Links = { ue4ssDownload: "", nexusGame: "", nexusManager: "", project: "" };
 const defaultLoadOrder: LoadOrderState = { entries: [], ue4ssEntries: [], activeConflicts: [], potentialConflicts: [], unapplied: false };
 
@@ -81,6 +82,7 @@ export default function App() {
   const [movingLibrary, setMovingLibrary] = useState(false);
   const [links, setLinks] = useState<Links>(defaultLinks);
   const [previews, setPreviews] = useState<ModPreview[]>([]);
+  const [packageTarget, setPackageTarget] = useState("");
   const [packageAssessment, setPackageAssessment] = useState<PackageAssessment | null>(null);
   // Names the person edited before installing, keyed by staging id. An archive
   // can hold several mods, so each keeps its own draft.
@@ -261,6 +263,7 @@ export default function App() {
       const replacedInstaller = installerRef.current;
       previewsRef.current = found.previews;
       setPreviews(found.previews);
+      setPackageTarget("");
       setPackageAssessment(found.package);
       openInstaller(found.installer);
       setNames({});
@@ -403,23 +406,21 @@ export default function App() {
    * Refusing outright left such a mod impossible to upgrade, so the user is
    * told which file changed and asked whether to overwrite it.
    */
-  async function installOnce(preview: ModPreview, allowUnverified: boolean) {
+  async function installOnce(preview: ModPreview) {
     const name = names[preview.stagingId];
     try {
-      return await backend.install(preview.stagingId, name, preview.replaces?.modId, false, allowUnverified);
+      return await backend.install(preview.stagingId, name, preview.replaces?.modId, false);
     } catch (e) {
       if (!isChangedFileError(e) || !preview.replaces) throw e;
       if (!window.confirm(`${friendlyError(e)}\n\nUpdate ${preview.replaces.name} anyway? The changed file is not carried over: the new version's own copy takes its place, or it goes if the new version ships none.`)) throw e;
-      return await backend.install(preview.stagingId, name, preview.replaces.modId, true, allowUnverified);
+      return await backend.install(preview.stagingId, name, preview.replaces.modId, true);
     }
   }
   async function install(preview: ModPreview) {
-    const allowUnverified = preview.verification === "unavailable";
-    if (allowUnverified && !window.confirm(`Install ${preview.name} without container verification?\n\nretoc is not available. Container integrity and package-level conflicts will not be checked. File safety checks and backups still apply.`)) return;
     setInstalling(preview.stagingId);
     try {
-      const mod = await installOnce(preview, allowUnverified);
-      notify(preview.replaces ? `${mod.name} replaced ${preview.replaces.name}.` : `${mod.name} installed${allowUnverified ? " without container verification" : ""}.`);
+      const mod = await installOnce(preview);
+      notify(preview.replaces ? `${mod.name} replaced ${preview.replaces.name}.` : `${mod.name} installed.`);
       const remaining = previewsRef.current.filter(item => item.stagingId !== preview.stagingId);
       previewsRef.current = remaining;
       setPreviews(remaining);
@@ -428,8 +429,12 @@ export default function App() {
     } catch (e) { notify(friendlyError(e), "error"); } finally { setInstalling(null); }
   }
   async function installAll(selected: ModPreview[]) {
-    const unchecked = selected.filter(preview => preview.verification === "unavailable");
-    if (unchecked.length && !window.confirm(`Install without container verification?\n\n${unchecked.map(preview => preview.name).join("\n")}\n\nretoc is not available. These components will not be checked for container integrity or package-level conflicts. File safety checks and backups still apply.`)) return;
+    const owners = selected.flatMap(item => item.replaces ? mods.filter(mod => mod.id === item.replaces!.modId) : []);
+    const bundles = [...new Set(owners.map(mod => mod.bundleId).filter(Boolean))];
+    if (!packageTarget && owners.length && (bundles.length !== 1 || owners.some(mod => !mod.bundleId))) { notify("This archive overlaps separate mods. Review the components before updating.", "error"); return; }
+    const replaceBundleId = packageTarget || bundles[0] || null;
+    const previous = mods.filter(mod => replaceBundleId && mod.bundleId === replaceBundleId);
+    if (replaceBundleId && !window.confirm(`Update the complete mod package?\n\nCurrent components:\n${previous.map(mod => mod.name).join("\n")}\n\nNew components:\n${selected.map(mod => mod.name).join("\n")}\n\nAll current components will be replaced. Components not included in this archive will be removed. If the operation fails, the previous package will be restored.`)) return;
     setInstalling("all");
     const components = [...selected].sort((left, right) => {
       const rank = (preview: ModPreview) => preview.modType === "ue4ss" ? 1 : 0;
@@ -439,8 +444,7 @@ export default function App() {
       const report = await backend.installBundle(components.map(preview => ({
         stagingId: preview.stagingId,
         name: names[preview.stagingId] || null,
-        allowUnverified: preview.verification === "unavailable"
-      })));
+      })), replaceBundleId);
       const installedIds = new Set(components.map(preview => preview.stagingId));
       const remaining = previewsRef.current.filter(item => !installedIds.has(item.stagingId));
       previewsRef.current = remaining;
@@ -499,6 +503,58 @@ export default function App() {
    * the override the entry could be neither updated nor removed, which left
    * the library with a mod there was no way to act on at all.
    */
+  async function bundleAction(members: ModSummary[], action: "toggle" | "verify" | "hide" | "remove") {
+    if (busyMod || loading || launching || installing || !members.length) return;
+    setBusyMod("bundle");
+    let completed = 0;
+    try {
+      if (action === "remove") {
+        await backend.uninstallBundle(members[0].id);
+        notify("Mod uninstalled, including all components.");
+      } else {
+        const enabled = !members.every(mod => mod.enabled);
+        const hidden = !members.every(mod => mod.hidden);
+        for (const mod of members) {
+          if (action === "verify") await backend.verify(mod.id);
+          if (action === "toggle" && mod.enabled !== enabled) await backend.setEnabled(mod.id, enabled);
+          if (action === "hide") await backend.setHidden(mod.id, hidden);
+          completed++;
+        }
+        notify(action === "verify" ? "All component files checked." : action === "toggle" ? `Mod ${enabled ? "enabled" : "disabled"}.` : "Library visibility updated.");
+      }
+    } catch (error) {
+      notify(action === "remove" ? friendlyError(error) : `Stopped after ${completed} of ${members.length} components. ${friendlyError(error)} Earlier changes were not undone.`, "error");
+    } finally { try { await refresh(); } finally { setBusyMod(null); } }
+  }
+  async function removeLibraryMods(selected: ModSummary[]) {
+    if (busyMod || loading || launching || installing) return;
+    setBusyMod("library-cleanup");
+    let removed = 0;
+    try {
+      for (const mod of selected) { await backend.uninstall(mod.id, false); removed++; }
+      notify(`${removed} mods removed.`);
+    } catch (error) {
+      notify(`Stopped after removing ${removed} of ${selected.length} mods. ${friendlyError(error)} Unprocessed mods were kept. Check the failed mod before using it again.`, "error");
+    } finally {
+      try { await refresh(); } finally { setBusyMod(null); }
+    }
+  }
+  async function clearTemporaryInstallations() {
+    if (busyMod || loading || launching || installing) return;
+    setBusyMod("library-cleanup");
+    try {
+      const staged = previewsRef.current;
+      if (staged.length) await backend.discardPreviews(staged.map(item => item.stagingId));
+      previewsRef.current = [];
+      setPreviews([]);
+      setPackageAssessment(null);
+      const session = installerRef.current;
+      if (session) await backend.fomodCancel(session.sessionId);
+      openInstaller(null);
+      notify("Temporary installation files cleared. Installed mods were kept.");
+    } catch (error) { notify(`Cleanup could not finish. ${friendlyError(error)}`, "error"); }
+    finally { setBusyMod(null); }
+  }
   async function uninstall(mod: ModSummary) {
     if (!window.confirm(`Uninstall ${mod.name}? Its managed library copy and unchanged deployed files will be removed.`)) return;
     setBusyMod(mod.id);
@@ -632,9 +688,10 @@ export default function App() {
     catch (error) { notify(friendlyError(error), "error"); }
   }
   async function deleteProfile(profile: ProfileSummary) {
-    if (!window.confirm(`Delete ${profile.name}? Installed mods and game files are not removed.`)) return;
+    setLoading(true);
     try { await backend.deleteProfile(profile.id); setSelectedProfile(activeProfile); await refresh(); notify(`${profile.name} deleted.`); }
     catch (error) { notify(friendlyError(error), "error"); }
+    finally { setLoading(false); }
   }
   async function setProfileMod(modId: string, enabled: boolean, priority: number | null) {
     if (!selectedProfile) return;
@@ -740,11 +797,11 @@ export default function App() {
     try {
       const result = await backend.checkForUpdates();
       setUpdate(result);
-      if (announce) notify(result.updateAvailable ? `Version ${result.latestVersion} is available.` : "Zero Mod Manager is up to date.");
+      if (announce) notify(result.releaseAvailable === false ? "No public release is available yet." : result.updateAvailable ? `Version ${result.latestVersion} is available.` : "Zero Mod Manager is up to date.");
     } catch (e) {
       const message = friendlyError(e);
       setUpdateError(message);
-      if (announce) notify(`Couldn’t check GitHub: ${message}`, "error");
+      if (announce) notify("Updates could not be checked. Retry in About or open All releases.", "error");
     } finally { setUpdateChecking(false); }
   }
 
@@ -760,7 +817,7 @@ export default function App() {
   return <Shell page={page} onPage={setPage} gameReady={dashboard.game.detected} updateAvailable={update?.updateAvailable === true} toolbar={<LaunchControls
     status={preflight?.status ?? (dashboard.game.detected || settings.customExecutablePath ? "unverified" : "blocked")}
     canLaunch={dashboard.game.detected || !!settings.customExecutablePath}
-    launching={launching}
+    launching={launching || !!busyMod}
     onHealth={() => setPage("diagnostics")}
     onLaunchGame={() => void launchGame()}
     onLaunchMode={mode => void launchMode(mode)}
@@ -788,17 +845,17 @@ export default function App() {
       onGetUe4ss={() => openExternal(links.ue4ssDownload)}
       onInstallUe4ss={() => void installUe4ss()}
       busy={loading}
-      launching={launching}
+      launching={launching || !!busyMod}
       canLaunch={dashboard.game.detected || !!settings.customExecutablePath}
       existingModsFound={existingPrompt ? (existingScan?.candidates.length ?? 0) + (existingScan?.unsupported.length ?? 0) : 0}
       onDismissExisting={() => setExistingPrompt(false)}
       onReviewExisting={() => { setExistingPrompt(false); setPage("mods"); setExistingReview(true); }}
     />}
-    {page === "mods" && <ModsPage mods={mods} loadOrder={loadOrder} orderPreview={orderPreview} orderBusy={orderBusy} onPreviewOrder={ids => void previewOrder(ids)} onApplyOrder={ids => void applyOrder(ids)} onApplyUe4ssOrder={ids => void applyUe4ssOrder(ids)} onCancelOrder={() => setOrderPreview(null)} onBrowseNexus={() => openExternal(links.nexusGame)} busy={busyMod} onInstall={() => setPage("install")} onDiscover={() => void discoverExisting(true)} discovering={discoveringExisting} onToggle={toggle} onUninstall={uninstall} onReconfigure={mod => void reconfigure(mod)} onVerify={verify} onRename={rename} onOpenInstalled={mod => void openFolder(`installed:${mod.id}`)} onOpenSource={mod => void openFolder(`mod:${mod.id}`)} onOpenModPage={mod => { if (mod.nexusUrl) openExternal(mod.nexusUrl); }} onSetHidden={(mod, hidden) => void setHidden(mod, hidden)} />}
-    {page === "install" && <InstallPage previews={previews} packageAssessment={packageAssessment} names={names} loading={loading} installer={installer} installerRestored={restored} installerCanGoBack={answers.length > 0} onInstallerNext={answer => void answerInstaller(answer)} onInstallerBack={() => void backInstaller()} advanced={advanced} installing={installing} onAdvanced={() => setAdvanced(!advanced)} onName={(stagingId, name) => setNames(current => ({ ...current, [stagingId]: name }))} onChooseFile={() => void choose({ filters: [{ name: "Supported mods", extensions: ["zip", "7z", "rar", "pak", "utoc", "ucas"] }] })} onChooseFolder={() => void choose({ directory: true })} onInstall={mod => void install(mod)} onInstallAll={mods => void installAll(mods)} onInstallRuntime={mod => void installRuntimeFrom(mod)} onCancel={() => void discardPreviews()} />}
+    {page === "mods" && <ModsPage onBundleAction={(members, action) => void bundleAction(members, action)} onBulkRemove={selected => void removeLibraryMods(selected)} onClearTemporary={() => void clearTemporaryInstallations()} temporaryCount={previews.length + (installer ? 1 : 0)} mods={mods} loadOrder={loadOrder} orderPreview={orderPreview} orderBusy={orderBusy} onPreviewOrder={ids => void previewOrder(ids)} onApplyOrder={ids => void applyOrder(ids)} onApplyUe4ssOrder={ids => void applyUe4ssOrder(ids)} onCancelOrder={() => setOrderPreview(null)} onBrowseNexus={() => openExternal(links.nexusGame)} busy={busyMod || (loading || launching || installing ? "operation" : null)} onInstall={() => setPage("install")} onDiscover={() => void discoverExisting(true)} discovering={discoveringExisting} onToggle={toggle} onUninstall={uninstall} onReconfigure={mod => void reconfigure(mod)} onVerify={verify} onRename={rename} onOpenInstalled={mod => void openFolder(`installed:${mod.id}`)} onOpenSource={mod => void openFolder(`mod:${mod.id}`)} onOpenModPage={mod => { if (mod.nexusUrl) openExternal(mod.nexusUrl); }} onSetHidden={(mod, hidden) => void setHidden(mod, hidden)} />}
+    {page === "install" && <InstallPage packageTarget={packageTarget} onPackageTarget={setPackageTarget} packageTargets={groupMods(mods).filter(group => group.members[0].bundleId).map(group => ({ id: group.members[0].bundleId!, name: group.name }))} previews={previews} packageAssessment={packageAssessment} names={names} loading={loading} installer={installer} installerRestored={restored} installerCanGoBack={answers.length > 0} onInstallerNext={answer => void answerInstaller(answer)} onInstallerBack={() => void backInstaller()} advanced={advanced} installing={installing} onAdvanced={() => setAdvanced(!advanced)} onName={(stagingId, name) => setNames(current => ({ ...current, [stagingId]: name }))} onChooseFile={() => void choose({ filters: [{ name: "Supported mods", extensions: ["zip", "7z", "rar", "pak", "utoc", "ucas"] }] })} onChooseFolder={() => void choose({ directory: true })} onInstall={mod => void install(mod)} onInstallAll={mods => void installAll(mods)} onInstallRuntime={mod => void installRuntimeFrom(mod)} onCancel={() => void discardPreviews()} />}
     {page === "profiles" && <ProfilesPage profiles={profiles} selected={selectedProfile} preview={profilePreview} snapshots={snapshots} busy={loading} onSelect={id => void selectProfile(id)} onCreate={(name, notes) => void createProfile(name, notes)} onSave={profile => void saveProfile(profile)} onDelete={profile => void deleteProfile(profile)} onSetMod={(modId, enabled, priority) => void setProfileMod(modId, enabled, priority)} onPreview={id => void reviewProfile(id)} onActivate={id => void activateSelectedProfile(id)} onExport={id => void exportProfile(id)} onImport={() => void importProfile()} onSnapshot={(label, knownGood) => void createCheckpoint(label, knownGood)} onRestoreSnapshot={snapshot => void restoreCheckpoint(snapshot)} />}
     {page === "diagnostics" && <HealthPage diagnostics={diagnostics} preflight={preflight} compatibility={compatibility} ue4ss={dashboard.ue4ss} configs={configs} configHistory={configHistory} activity={activity} sessions={launchSessions} isolation={isolation} supportPreview={supportPreview} configPreview={configPreview} loading={loading || launching} onRefresh={() => void refreshOperationalHealth()} onCopyDiagnostics={() => void navigator.clipboard.writeText(diagnostics?.text ?? "").then(() => notify("Diagnostic report copied."))} onOpenUe4ssLog={() => void openFolder("ue4ss-log")} onOpenLogs={() => void openFolder("logs")} onPreviewConfig={(path, content) => void previewConfig(path, content)} onApplyConfig={(path, content, hash) => void applyConfig(path, content, hash)} onRollbackConfig={id => void rollbackConfig(id)} onCreateSupportBundle={() => void saveSupportBundle()} onCompleteSession={(id, outcome) => void completeSession(id, outcome)} onStartIsolation={() => void startIsolation()} onRunIsolationStep={session => void runIsolationStep(session)} onRecordIsolation={(session, outcome) => void recordIsolation(session, outcome)} onCancelIsolation={id => void cancelIsolation(id)} />}
-    {page === "settings" && <SettingsPage settings={settings} retoc={dashboard.retoc} sevenZip={sevenZip} managedLibrary={managedLibrary} movingLibrary={movingLibrary} onChange={setSettings} onSave={() => void saveSettings()} onPickGame={() => void locateGame()} onPickExecutable={async () => { const picked = await open({ multiple: false, title: "Select game executable or launcher" }); if (typeof picked === "string") setSettings({ ...settings, customExecutablePath: picked }); }} onPickRetoc={async () => { const picked = await open({ multiple: false, title: "Select retoc executable" }); if (typeof picked === "string") setSettings({ ...settings, retocPath: picked }); }} onPickSevenZip={async () => { const picked = await open({ multiple: false, title: "Select the 7-Zip command-line executable (7z.exe)" }); if (typeof picked === "string") setSettings({ ...settings, sevenZipPath: picked }); }} onMoveLibrary={() => void moveLibrary()} onUseDefaultLibrary={() => void moveLibrary(true)} onOpenLibrary={() => void openFolder("library")} onOpenLogs={() => void openFolder("logs")} onOpenData={() => void openFolder("data")} links={links} onOpenLink={openExternal} />}
+    {page === "settings" && <SettingsPage settings={settings} sevenZip={sevenZip} managedLibrary={managedLibrary} movingLibrary={movingLibrary} onChange={setSettings} onSave={() => void saveSettings()} onPickGame={() => void locateGame()} onPickExecutable={async () => { const picked = await open({ multiple: false, title: "Select game executable or launcher" }); if (typeof picked === "string") setSettings({ ...settings, customExecutablePath: picked }); }} onPickSevenZip={async () => { const picked = await open({ multiple: false, title: "Select the 7-Zip command-line executable (7z.exe)" }); if (typeof picked === "string") setSettings({ ...settings, sevenZipPath: picked }); }} onMoveLibrary={() => void moveLibrary()} onUseDefaultLibrary={() => void moveLibrary(true)} onOpenLibrary={() => void openFolder("library")} onOpenLogs={() => void openFolder("logs")} onOpenData={() => void openFolder("data")} links={links} onOpenLink={openExternal} />}
     {page === "about" && <AboutPage projectUrl={links.project} nexusUrl={links.nexusManager} onOpenLink={openExternal} update={update} checking={updateChecking} error={updateError} onCheckUpdates={() => void checkUpdates(true)} />}
     {discoveringExisting && <div className="scan-indicator" role="status"><span className="spin" />Scanning game folders for existing mods…</div>}
     {existingReview && existingScan && <AdoptionDialog scan={existingScan} busy={adoptingExisting} onClose={() => setExistingReview(false)} onAdopt={adoptExisting} />}

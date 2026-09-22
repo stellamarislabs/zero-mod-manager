@@ -222,20 +222,6 @@ pub fn report(conn: &Connection) -> Result<CompatibilityReport> {
         }
     }
     let mut issues = Vec::new();
-    for item in enabled.values() {
-        if item.container_verification.as_deref() == Some("unavailable") {
-            issues.push(CompatibilityIssue {
-                id: format!("container-unverified:{}", item.id),
-                status: "warning".into(),
-                rule_type: "container-verification".into(),
-                title: format!("{}: container not verified", item.name),
-                detail: "Installed with your consent without retoc. Container integrity and package overlaps are unknown.".into(),
-                source: "local-analysis".into(),
-                evidence_url: None,
-                member_ids: vec![item.id.clone()],
-            });
-        }
-    }
     let current_build = crate::database::get_setting(conn, "last_game_build")?;
     let current_platform = std::env::consts::OS.to_ascii_lowercase();
     for item in enabled.values() {

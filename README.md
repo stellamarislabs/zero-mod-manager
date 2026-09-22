@@ -13,7 +13,7 @@ A dedicated open-source mod operations console for **Star Wars: Zero Company**.
 
 Zero Mod Manager understands Zero Company mod payloads instead of
 treating them as arbitrary files. It discovers Steam installations, validates
-IoStore containers with retoc, manages UE4SS script and DLL mods, installs
+IoStore companion files, manages UE4SS script and DLL mods, installs
 game-folder mods such as ReShade, detects package overlap,
 records SHA-256 ownership, and includes Linux/Proton-specific diagnostics (platform qualification is pending).
 
@@ -28,7 +28,7 @@ records SHA-256 ownership, and includes Linux/Proton-specific diagnostics (platf
 - [Bug reports](https://github.com/stellamarislabs/zero-mod-manager/issues)
 - [Application releases](https://github.com/stellamarislabs/zero-mod-manager/releases)
 
-0.7.0-rc.1 is a test candidate, not Stable. Read [download verification and
+0.7.0-rc.2 is a test candidate, not Stable. Read [download verification and
 Windows warnings](docs/RELEASE-SECURITY.md), [known limitations](KNOWN_LIMITATIONS.md),
 and [migration/rollback](docs/MIGRATION-ROLLBACK.md) before installing.
 The current local Windows packages are unsigned. Game acceptance is pending.
@@ -57,7 +57,7 @@ The current local Windows packages are unsigned. Game acceptance is pending.
   by answering the author's questions, with images, descriptions, and
   recommended answers
 - Separate, labeled choices for packaged variants bundled in sibling folders
-- IoStore pair/triplet validation and retoc 0.1.5 verification
+- IoStore pair/triplet layout checks
 - PAK-only and UE4SS Lua/DLL mod support
 - Unreal plugin mods with their `.uplugin`, `AssetRegistry.bin`, and complete
   packaged content preserved under `SWZeroCompany/Mods`
@@ -114,7 +114,7 @@ Example_P.ucas
 ```
 
 UTOC and UCAS must share a basename and both must be present. A companion PAK
-is installed when supplied. retoc verification is optional. If it is unavailable, explicit confirmation allows installation with an Unverified warning. Failed verification cannot be bypassed.
+is installed when supplied. Container content verification is not performed.
 
 When an archive contains packaged alternatives in separate folders, the install
 review presents each folder as a labeled option instead of combining every
@@ -205,16 +205,14 @@ Download the package for your platform from the GitHub release:
 
 - Linux: make the AppImage executable and run it, or install the `.deb`.
 - Windows: run the NSIS installer, or extract the portable `.zip` anywhere and
-  run `Zero Mod Manager.exe`. Optionally select a trusted retoc executable in Settings for
-  IoStore integrity checks; third-party tools are not silently bundled. The portable
+  run `Zero Mod Manager.exe`. Third-party tools are not silently bundled. The portable
   build also assumes the Microsoft Edge WebView2 runtime is already present,
   which it is on Windows 11 and on Windows 10 machines with current Edge; the
   installer downloads it when missing. Community builds are unsigned, so
   Windows SmartScreen may show a warning. See docs/RELEASE-SECURITY.md;
   do not disable Windows security protections.
 
-Release packages do not include retoc or an archive extractor. Select a trusted,
-host-installed retoc executable for IoStore verification. ZIP is built in; 7z
+Release packages do not include an archive extractor. ZIP is built in; 7z
 and RAR archives use a host-installed 7-Zip/NanaZip-compatible command.
 
 ## Quick Start
@@ -271,7 +269,7 @@ everything it decided, and returns that step exactly as it was left.
 
 Only the files the answers selected are installed. They are written into a
 sandbox of their own and then read exactly like an ordinary download, so the
-result reaches the same review screen, with the same container verification,
+result reaches the same review screen, with the same file safety checks,
 conflict detection, compatibility check, and naming, as any other mod. An
 archive holding sixteen mutually exclusive variants therefore becomes one mod
 entry rather than sixteen options to compare by hand, and its selected options
@@ -317,9 +315,8 @@ Two levels are tracked:
 
 1. **Filesystem collision:** two payloads target the same destination. A new
    install never overwrites an existing file.
-2. **Package collision:** retoc package identifiers are hashed and stored. Mods
-   that override the same identifiers are reported as overlapping packages,
-   even when container filenames differ.
+2. **Asset collision:** new container assets are not scanned. Previously recorded
+   package overlap data and explicit compatibility rules may still be displayed.
 
 Normal UI and logs show only overlap counts. Raw asset paths are exposed only
 after the user enables advanced package names in Settings and opens Advanced
@@ -340,19 +337,16 @@ before a rename. A failed filesystem or database step rolls back, and an
 interrupted operation is recovered at the next startup.
 
 IoStore triplets are orderable because both priority directions were
-demonstrated against Zero Company's runtime and re-verified with retoc after
+demonstrated against Zero Company's runtime and checked for unchanged file bytes after
 each rename. Pure UTOC/UCAS pairs and PAK-only mods remain visible but
 non-orderable. The pair layout is untested; the PAK-only capability fixture did
 not pass the runtime gate. PAK-only package contents also remain opaque, so
 their overlap winners cannot be identified automatically.
 
-## Container Verification
+## Container handling
 
-Zero Mod Manager invokes a user-selected or host-installed **retoc** using
-`retoc verify <container.utoc>` and collects package identifiers with `retoc
-list --package --path`. A failed verifier prevents IoStore installation. An unavailable verifier allows
-installation only after explicit confirmation; integrity and package overlaps remain unverified. Tool output shown in normal mode has home-directory prefixes
-replaced with `~` and is truncated to avoid accidental data disclosure.
+IoStore companion files are checked without an external verifier. Container contents
+and asset-level overlaps are not inspected. File checksums and archive safety remain enabled.
 
 ## UE4SS Mods
 
@@ -439,7 +433,7 @@ through standard Tauri signing secrets without changing application behavior.
 ## Diagnostics
 
 **Mod Doctor** checks the game layout, manifest/build, `~mods`, owned mods,
-package conflicts, retoc, UE4SS, compatdata, and the Proton DLL override. The
+reported conflicts, UE4SS, compatdata, and the Proton DLL override. The
 report is copyable and home-directory paths are sanitized. Structured JSONL
 logs are available from Settings → **Open logs folder**.
 
@@ -492,8 +486,7 @@ npm run tauri build
 ```
 
 No third-party runtime or modding tool is fetched as part of the application
-build. IoStore verification tests use a retoc executable explicitly supplied by
-the developer or discovered on the host.
+build. Container companion-file layout checks use synthetic fixtures.
 
 ## Development
 
@@ -530,7 +523,6 @@ src-tauri/src/mods/          payload and manifest recognition
 src-tauri/src/fomod/         FOMOD installer scripts and guided selection
 src-tauri/src/adoption.rs    existing-mod discovery and adoption
 src-tauri/src/deployment/    ownership-safe lifecycle
-src-tauri/src/retoc/         verifier abstraction
 src-tauri/src/ue4ss/         runtime and mods.txt handling
 src-tauri/src/database/      SQLite schema and queries
 src-tauri/src/diagnostics/   Mod Doctor
@@ -564,13 +556,11 @@ with real user paths or game data.
 
 ## Credits
 
-Thanks to the Zero Company modding community and to the maintainers of retoc, Tauri, React, rusqlite, zip-rs, and the wider open-source ecosystem.
+Thanks to the Zero Company modding community and to the maintainers of Tauri, React, rusqlite, zip-rs, and the wider open-source ecosystem.
 
 ## Third-Party Software
 
-retoc is MIT-licensed third-party software. Zero Mod Manager can use a copy the
-user explicitly selects or installs on the host; it is not included silently in
-release packages. Exact copyright and license notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Exact copyright and license notices for third-party dependencies are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 No code was copied from Vortex or another mod manager.
 
 ## License

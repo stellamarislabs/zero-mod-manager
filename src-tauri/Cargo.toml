@@ -1,6 +1,6 @@
 [package]
 name = "zero-mod-manager"
-version = "0.7.0-rc.1"
+version = "0.7.0-rc.2"
 description = "An independent community mod manager for Star Wars: Zero Company"
 authors = ["Zero Mod Manager contributors", "Victor Hugo (arctco)"]
 edition = "2021"
@@ -19,6 +19,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 sha2 = "0.10"
@@ -39,3 +40,6 @@ toml_edit = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry"] }

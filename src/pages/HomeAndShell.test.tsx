@@ -35,7 +35,7 @@ const dashboard: Dashboard = {
   previousBuildId: null,
   dataDirectory: "/data/zcom",
   storageMode: "platform",
-  retoc: { found: true, path: "/bin/retoc", version: "retoc 0.1.5" },
+
   existingModScanPending: false
 };
 

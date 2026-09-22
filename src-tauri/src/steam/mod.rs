@@ -297,7 +297,9 @@ fn ea_registry_paths() -> Vec<PathBuf> {
 
 pub fn discover_ea() -> Result<Option<GameInfo>> {
     for path in ea_registry_paths() {
-        let mut info = from_manual(&path)?;
+        let Ok(mut info) = from_manual(&path) else {
+            continue;
+        };
         info.source = "ea".into();
         return Ok(Some(info));
     }

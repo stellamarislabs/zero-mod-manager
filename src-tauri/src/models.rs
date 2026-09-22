@@ -89,7 +89,6 @@ pub struct Dashboard {
     pub previous_build_id: Option<String>,
     pub data_directory: String,
     pub storage_mode: String,
-    pub retoc: ToolInfo,
     /// Whether the one-time existing-mod discovery has not yet been shown.
     pub existing_mod_scan_pending: bool,
 }
@@ -305,7 +304,6 @@ pub struct StagedMod {
     pub files: Vec<PayloadFile>,
     pub packages: Vec<String>,
     pub verification: String,
-    pub verification_details: Option<String>,
     /// The complete extracted FOMOD package. Unlike `staging_root`, this holds
     /// every option, not only the payload selected by the current answers.
     pub fomod_source_root: Option<PathBuf>,
@@ -341,6 +339,7 @@ pub struct ModPreview {
     pub mod_type: String,
     pub files: Vec<String>,
     pub warnings: Vec<String>,
+    pub supplementary_files: Vec<String>,
     pub valid: bool,
     pub verification: String,
     pub verification_details: Option<String>,
@@ -476,7 +475,6 @@ pub struct DiagnosticReport {
 pub struct AppSettings {
     pub game_path: Option<String>,
     pub custom_executable_path: Option<String>,
-    pub retoc_path: Option<String>,
     /// A 7-Zip executable the user pointed at, for the machines where 7-Zip is
     /// installed somewhere the automatic search does not reach.
     pub seven_zip_path: Option<String>,
@@ -500,7 +498,6 @@ impl Default for AppSettings {
         Self {
             game_path: None,
             custom_executable_path: None,
-            retoc_path: None,
             seven_zip_path: None,
             log_level: "normal".into(),
             advanced_package_names: false,

@@ -11,7 +11,7 @@ depends on the game, its real-game evidence are attached to the release record.
 | Moved Steam library | Persisted path becomes stale | library-folder discovery and explicit invalid-path state | Steam library parser regression | moved-library upgrade scenario |
 | 7-Zip installed but not found | installer does not add CLI to PATH | registry, standard-folder, NanaZip, PATH, and manual resolver | resolver tests | Windows clean-machine smoke test |
 | ModKit/plugin payload incomplete | generic file picking loses plugin structure | dedicated plugin family preserves `.uplugin`, registry, and content | archive fixture lifecycle | full plugin visible in game |
-| IoStore triplet or load order fails | family and order invariants not enforced | pair/triplet validation, retoc evidence, previewable order | lifecycle matrix | two-direction winner test |
+| IoStore triplet or load order fails | family and order invariants not enforced | pair/triplet validation, previewable order | lifecycle matrix | two-direction winner test |
 | Linux launch inherits AppImage libraries | child environment contamination | sanitized host `xdg-open` environment | environment unit test | AppImage/Proton launch |
 | Managed file changed by the mod | checksum guard prevented all lifecycle actions | explicit force path with warning and preserved transaction history | changed-file lifecycle tests | writable UE4SS settings mod update |
 | Interrupted install/profile/temporary launch | partial filesystem state | snapshots, operation records, pending restore, and rollback path | interruption/restart tests | forced termination during RC smoke test |

@@ -27,9 +27,23 @@ function props(overrides: Partial<Parameters<typeof InstallPage>[0]> = {}): Para
 }
 
 describe("install preview", () => {
-  it("offers an explicit unverified install when retoc is unavailable", () => {
+  it("keeps harmless supplementary files in details while exposing native-code risks", () => {
+    const candidate = {...preview("dll","Helmet"), supplementaryFiles:["README.md","SHA256SUMS.txt","licenses/MinHook.txt"], warnings:["Native DLL runs inside the game."]};
+    const {rerender} = render(<InstallPage {...props({previews:[candidate]})} />);
+    expect(screen.queryByText("README.md")).toBeNull();
+    expect(screen.queryByText("Packages modified")).toBeNull();
+    expect(screen.getByText("Native DLL runs inside the game.")).toBeTruthy();
+    rerender(<InstallPage {...props({previews:[candidate],advanced:true})} />);
+    expect(screen.getByText("README.md")).toBeTruthy();
+    expect(screen.getByText("licenses/MinHook.txt")).toBeTruthy();
+  });
+  it("keeps compatibility problems visible when details are collapsed", () => {
+    render(<InstallPage {...props({previews:[{...preview("bad","Wrong build"),compatibility:"warning",compatibilityMessage:"This game build is not supported."}]})} />);
+    expect(screen.getByRole("alert").textContent).toContain("This game build is not supported.");
+  });
+  it("does not prompt for retired container verification", () => {
     render(<InstallPage {...props({ previews: [{ ...preview("io", "Containers", "iostore"), verification: "unavailable" }] })} />);
-    const button = screen.getByRole("button", { name: /Install without verification/ }) as HTMLButtonElement;
+    const button = screen.getByRole("button", { name: "Install" }) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
   });
 
@@ -116,7 +130,7 @@ describe("upgrades", () => {
     expect(onInstall).toHaveBeenCalledWith(upgrade);
   });
 
-  it("keeps bundle updates on the individually reversible path", () => {
+  it("offers complete package update with replacement disclosure", () => {
     const core = {
       ...preview("core", "Squad Six - Core", "iostore"),
       replaces: { modId: "old-core", name: "Squad Six - Core", version: "1.0.1", reason: "It ships the same container files." }
@@ -127,7 +141,8 @@ describe("upgrades", () => {
     };
     render(<InstallPage {...props({ previews: [core, runtime] })} />);
     expect(screen.queryByRole("button", { name: /all components/i })).toBeNull();
-    expect(screen.getByText(/install each component separately/i)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Update complete mod" })).toBeDefined();
+    expect(screen.getByText(/replaces the complete existing package/i)).toBeDefined();
     expect(screen.getAllByRole("button", { name: "Replace installed version" })).toHaveLength(2);
   });
 });

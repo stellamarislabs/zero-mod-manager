@@ -20,7 +20,7 @@ the game.
 
 | Package family | Representative IDs | 0.7 status |
 | --- | --- | --- |
-| PAK/IoStore | 3, 14, 18, 33, 39, 40, 47, 50, 61, 62, 63, 64, 72, 73, 77, 100, 102, 103, 105, 109, 110, 135, 137, 140, 154 | Recognized; IoStore validation still requires retoc. |
+| PAK/IoStore | 3, 14, 18, 33, 39, 40, 47, 50, 61, 62, 63, 64, 72, 73, 77, 100, 102, 103, 105, 109, 110, 135, 137, 140, 154 | Recognized; companion-file checks only, no external content verifier. |
 | UE4SS runtime | 9 | Classified as runtime rather than a library mod. |
 | UE4SS Lua/native | 38 and other runtime mods | Recognized when the standard `Mods/<name>/Scripts` or `dlls` layout is present. |
 | Unreal plugin/ModKit | 160, 162, 174, 186, 188, 193, 201, 206, 218 | Full plugin folders and sidecars are retained. |

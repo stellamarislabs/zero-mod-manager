@@ -20,3 +20,16 @@ file to the manager backup area, swaps the new file into place, and records the
 checkpoint in Health → Config Workbench. Restore uses that exact backup.
 
 Save files are never part of a profile, migration, support bundle, or rollback.
+## RC2 package recovery
+
+Install, complete-package replacement and removal snapshot affected files and the
+database before mutation. On failure the journal restores the prior state. After
+interruption, startup attempts recovery before opening the normal database. This
+is automatic, not a choice dialog. Close the game before retrying recovery. If
+backup validation fails, stop and retain the application data for investigation;
+do not delete the pending package-operation folder.
+
+Completed recovery history is kept locally in package-recovery, including copies
+of interrupted files where applicable. It can be large. There is no retention UI
+yet. Package toggles and selected-library cleanup remain sequential component
+operations rather than one selection-wide transaction.

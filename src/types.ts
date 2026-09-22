@@ -44,6 +44,7 @@ export interface Links {
 }
 
 export interface UpdateInfo {
+  releaseAvailable?: boolean;
   currentVersion: string;
   latestVersion: string;
   releaseUrl: string;
@@ -77,7 +78,6 @@ export interface Dashboard {
   previousBuildId: string | null;
   dataDirectory: string;
   storageMode: "platform" | "portable";
-  retoc: ToolInfo;
   existingModScanPending: boolean;
 }
 
@@ -121,7 +121,6 @@ export interface ModSummary {
 }
 
 export interface BundleInstallItem {
-  allowUnverified?: boolean;
   stagingId: string;
   name: string | null;
 }
@@ -216,6 +215,7 @@ export interface ModPreview {
   modType: PreviewType;
   files: string[];
   warnings: string[];
+  supplementaryFiles?: string[];
   valid: boolean;
   verification: "passed" | "failed" | "unavailable" | "not-required";
   verificationDetails: string | null;
@@ -330,7 +330,6 @@ export interface ExistingModScan {
 }
 
 export interface AdoptionGroup {
-  allowUnverified?: boolean;
   candidateIds: string[];
   name: string;
 }
@@ -362,7 +361,6 @@ export interface DiagnosticReport {
 export interface AppSettings {
   gamePath: string | null;
   customExecutablePath: string | null;
-  retocPath: string | null;
   /** A 7-Zip executable the user pointed at, when the automatic search misses it. */
   sevenZipPath: string | null;
   logLevel: "normal" | "verbose" | "developer";

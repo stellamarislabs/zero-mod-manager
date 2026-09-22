@@ -11,7 +11,7 @@ use crate::{
         ProfileSummary, ProfileSwitchPreview, ReplacedMod, SnapshotSummary, StagedMod,
         SupportBundlePreview, SupportBundleReport, ToolInfo,
     },
-    mods, operations, profiles, retoc, sessions, steam, support, ue4ss, AppContext,
+    mods, operations, profiles, sessions, steam, support, ue4ss, AppContext,
 };
 use std::{
     path::{Path, PathBuf},
@@ -20,6 +20,18 @@ use std::{
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
+
+fn package_operation<T>(ctx: &AppContext, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    let (_, game_path) = require_game(ctx)?;
+    let library = mods_dir(ctx)?;
+    let mut conn = connection(ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before changing mods.".into(),
+        ));
+    }
+    crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |_| action())
+}
 
 fn connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
     database::open(&ctx.db_path)
@@ -56,6 +68,9 @@ fn game(ctx: &AppContext) -> Result<GameInfo> {
 }
 fn require_game(ctx: &AppContext) -> Result<(GameInfo, PathBuf)> {
     let info = game(ctx)?;
+    if !info.detected {
+        return Err(AppError::GameNotFound);
+    }
     let path = info
         .path
         .as_ref()
@@ -63,10 +78,8 @@ fn require_game(ctx: &AppContext) -> Result<(GameInfo, PathBuf)> {
         .ok_or(AppError::GameNotFound)?;
     Ok((info, path))
 }
-fn tool(ctx: &AppContext) -> Result<crate::models::ToolInfo> {
-    let conn = connection(ctx)?;
-    let settings = database::settings(&conn)?;
-    Ok(retoc::find(settings.retoc_path.as_deref()))
+fn tool(_ctx: &AppContext) -> Result<crate::models::ToolInfo> {
+    Ok(crate::models::ToolInfo::default())
 }
 fn previews(
     ctx: &AppContext,
@@ -107,7 +120,6 @@ pub fn get_dashboard(ctx: State<'_, AppContext>) -> Result<Dashboard> {
     let game_path = game.path.as_deref().map(Path::new);
     let compat = game.compat_data_path.as_deref().map(Path::new);
     let ue4ss = ue4ss::detect(game_path, compat);
-    let retoc = tool(&ctx)?;
     let existing_mod_scan_pending =
         database::get_setting(&conn, "existing_mod_prompt_acknowledged")?.as_deref()
             != Some("true");
@@ -120,7 +132,6 @@ pub fn get_dashboard(ctx: State<'_, AppContext>) -> Result<Dashboard> {
         previous_build_id: ctx.previous_build_id.clone(),
         data_directory: ctx.data_dir.display().to_string(),
         storage_mode: ctx.storage_mode.into(),
-        retoc,
         existing_mod_scan_pending,
     })
 }
@@ -133,9 +144,8 @@ pub fn list_mods(ctx: State<'_, AppContext>) -> Result<Vec<ModSummary>> {
 pub fn discover_existing_mods(ctx: State<'_, AppContext>) -> Result<ExistingModScan> {
     let (game_info, game_path) = require_game(&ctx)?;
     let conn = connection(&ctx)?;
-    let settings = database::settings(&conn)?;
-    let retoc = retoc::find(settings.retoc_path.as_deref());
-    let (scan, snapshot) = adoption::discover(&conn, &game_path, &retoc)?;
+    let scan_options = crate::models::ToolInfo::default();
+    let (scan, snapshot) = adoption::discover(&conn, &game_path, &scan_options)?;
     let mut held = discoveries(&ctx)?;
     // Discovery snapshots point into the live game folder and are useful only
     // to the currently visible review. Dropping older scans also bounds memory.
@@ -397,7 +407,7 @@ fn scan_staged(
         game.path.as_deref().map(Path::new),
         game.compat_data_path.as_deref().map(Path::new),
     );
-    let tool = retoc::find(settings.retoc_path.as_deref());
+    let tool = crate::models::ToolInfo::default();
     mods::scan_staged(
         source,
         staging,
@@ -813,7 +823,7 @@ fn replaced_by(conn: &rusqlite::Connection, staged: &StagedMod) -> Result<Option
             })
             .transpose()?
             .map(|id| (id, "It ships the same container files.".to_string())),
-        "gamedir" => {
+        "gamedir" | "plugin" | "config" => {
             let game = match game_path(conn)? {
                 Some(path) => path,
                 None => return Ok(None),
@@ -824,7 +834,10 @@ fn replaced_by(conn: &rusqlite::Connection, staged: &StagedMod) -> Result<Option
                 .find_map(|file| {
                     database::destination_owner(
                         conn,
-                        &game.join(&file.destination_relative).display().to_string(),
+                        &deployment::destination_base(&game, &staged.mod_type)
+                            .join(&file.destination_relative)
+                            .display()
+                            .to_string(),
                         None,
                     )
                     .transpose()
@@ -932,128 +945,131 @@ pub fn install_mod(
     name: Option<String>,
     replace: Option<String>,
     force: bool,
-    allow_unverified: Option<bool>,
     ctx: State<'_, AppContext>,
 ) -> Result<ModSummary> {
-    let mut staged = previews(&ctx)?
-        .get(&staging_id)
-        .cloned()
-        .ok_or(AppError::PreviewExpired)?;
-    if let Some(name) = name
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-    {
-        staged.name = name.chars().take(120).collect();
-    }
-    if staged.mod_type == "ue4ss-runtime" {
-        return Err(AppError::Other(
-            "That archive is the UE4SS runtime. Install it with the UE4SS button instead.".into(),
-        ));
-    }
-    retoc::require_install_consent(&staged, allow_unverified.unwrap_or(false))?;
-    let (game_info, game_path) = require_game(&ctx)?;
-    let mut conn = connection(&ctx)?;
-    // Position the replacement where the mod it supersedes sat, rather than at
-    // the top, so an upgrade does not silently change which mod wins.
-    let previous_order = replace
-        .as_ref()
-        .map(|_| ordered_supported(&conn))
-        .transpose()?;
-    let library = mods_dir(&ctx)?;
-    let result = match replace.as_deref() {
-        Some(old_id) => deployment::replace(
-            &mut conn,
-            &library,
-            &game_path,
-            old_id,
-            &staged,
-            game_info.steam_build_id,
-            force,
-        ),
-        None => deployment::install(
-            &mut conn,
-            &library,
-            &game_path,
-            &staged,
-            game_info.steam_build_id,
-        ),
-    };
-    let summary = result?;
-    if let Some(manifest) = &staged.manifest {
-        if let Err(error) = compatibility::install_author_manifest(&conn, &summary.id, manifest) {
-            let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
-            return Err(error);
+    package_operation(&ctx, || {
+        let mut staged = previews(&ctx)?
+            .get(&staging_id)
+            .cloned()
+            .ok_or(AppError::PreviewExpired)?;
+        if let Some(name) = name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            staged.name = name.chars().take(120).collect();
         }
-        if let Some(nexus) = &manifest.nexus {
-            if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
-                database::set_nexus_ids(&conn, &summary.id, mod_id, file_id)?;
+        if staged.mod_type == "ue4ss-runtime" {
+            return Err(AppError::Other(
+                "That archive is the UE4SS runtime. Install it with the UE4SS button instead."
+                    .into(),
+            ));
+        }
+        let (game_info, game_path) = require_game(&ctx)?;
+        let mut conn = connection(&ctx)?;
+        // Position the replacement where the mod it supersedes sat, rather than at
+        // the top, so an upgrade does not silently change which mod wins.
+        let previous_order = replace
+            .as_ref()
+            .map(|_| ordered_supported(&conn))
+            .transpose()?;
+        let library = mods_dir(&ctx)?;
+        let result = match replace.as_deref() {
+            Some(old_id) => deployment::replace(
+                &mut conn,
+                &library,
+                &game_path,
+                old_id,
+                &staged,
+                game_info.steam_build_id,
+                force,
+            ),
+            None => deployment::install(
+                &mut conn,
+                &library,
+                &game_path,
+                &staged,
+                game_info.steam_build_id,
+            ),
+        };
+        let summary = result?;
+        if let Some(manifest) = &staged.manifest {
+            if let Err(error) = compatibility::install_author_manifest(&conn, &summary.id, manifest)
+            {
+                let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
+                return Err(error);
+            }
+            if let Some(nexus) = &manifest.nexus {
+                if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
+                    database::set_nexus_ids(&conn, &summary.id, mod_id, file_id)?;
+                }
             }
         }
-    }
-    if summary.mod_type == "ue4ss" {
-        // The recorded start order is the source of truth, so mods.txt is
-        // rewritten from it. For a fresh install that only confirms the entry
-        // just appended; for an upgrade it restores the slot it inherited.
-        let ordered = load_order::state(&conn)?
-            .ue4ss_entries
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
-        if let Err(error) = load_order::apply_ue4ss_order(&mut conn, &game_path, &ordered) {
-            log(&ctx, "warn", "ue4ss_order_not_written", &error.to_string());
+        if summary.mod_type == "ue4ss" {
+            // The recorded start order is the source of truth, so mods.txt is
+            // rewritten from it. For a fresh install that only confirms the entry
+            // just appended; for an upgrade it restores the slot it inherited.
+            let ordered = load_order::state(&conn)?
+                .ue4ss_entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            if let Err(error) = load_order::apply_ue4ss_order(&mut conn, &game_path, &ordered) {
+                log(&ctx, "warn", "ue4ss_order_not_written", &error.to_string());
+            }
         }
-    }
-    if matches!(summary.mod_type.as_str(), "pak" | "iostore") {
-        let ordered = match (previous_order, replace.as_deref()) {
-            (Some(previous), Some(old_id)) => keep_position(&conn, &previous, old_id, &summary.id)?,
-            _ => ordered_supported(&conn)?,
-        };
-        if let Err(error) = load_order::apply(
-            &mut conn,
-            &ordered,
-            &ctx.data_dir.join("load-order-operation.json"),
-        ) {
-            let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
-            return Err(error);
+        if matches!(summary.mod_type.as_str(), "pak" | "iostore") {
+            let ordered = match (previous_order, replace.as_deref()) {
+                (Some(previous), Some(old_id)) => {
+                    keep_position(&conn, &previous, old_id, &summary.id)?
+                }
+                _ => ordered_supported(&conn)?,
+            };
+            if let Err(error) = load_order::apply(
+                &mut conn,
+                &ordered,
+                &ctx.data_dir.join("load-order-operation.json"),
+            ) {
+                let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
+                return Err(error);
+            }
         }
-    }
-    // Keep a failed preview available for retry. Only a fully successful
-    // deployment consumes its staging id and may release the shared bundle
-    // sandbox.
-    previews(&ctx)?.remove(&staging_id);
-    release_staging(&ctx, &staged.staging_root);
-    if let Some(root) = &staged.fomod_source_root {
-        release_staging(&ctx, root);
-    }
-    log(
-        &ctx,
-        "info",
-        "mod_installed",
-        &format!("mod_id={} type={}", summary.id, summary.mod_type),
-    );
-    profiles::capture_active(&conn)?;
-    let _ = operations::record(
-        &conn,
-        "install",
-        "completed",
-        &format!("Installed {}", summary.name),
-        serde_json::json!({"modId": &summary.id, "type": &summary.mod_type}),
-    );
-    Ok(summary)
+        // Keep a failed preview available for retry. Only a fully successful
+        // deployment consumes its staging id and may release the shared bundle
+        // sandbox.
+        previews(&ctx)?.remove(&staging_id);
+        release_staging(&ctx, &staged.staging_root);
+        if let Some(root) = &staged.fomod_source_root {
+            release_staging(&ctx, root);
+        }
+        log(
+            &ctx,
+            "info",
+            "mod_installed",
+            &format!("mod_id={} type={}", summary.id, summary.mod_type),
+        );
+        profiles::capture_active(&conn)?;
+        let _ = operations::record(
+            &conn,
+            "install",
+            "completed",
+            &format!("Installed {}", summary.name),
+            serde_json::json!({"modId": &summary.id, "type": &summary.mod_type}),
+        );
+        Ok(summary)
+    })
 }
 
-/// Installs every fresh component from one inspected archive as one atomic
-/// operation. A later checkpoint will extend the journal to multi-component
-/// replacements; until then, a bundle containing an update is rejected before
-/// any file changes so the interface cannot promise a rollback it cannot make.
+/// Deploys a complete inspected package, with explicit whole-package replacement
+/// consent and durable file/database rollback covering metadata and load order.
 #[tauri::command]
 pub fn install_bundle(
     items: Vec<BundleInstallItem>,
+    replace_bundle_id: Option<String>,
     ctx: State<'_, AppContext>,
 ) -> Result<BundleInstallReport> {
-    if !(2..=64).contains(&items.len()) {
+    if !(1..=64).contains(&items.len()) {
         return Err(AppError::Other(
-            "A bundle install needs between 2 and 64 components.".into(),
+            "A bundle install needs between 1 and 64 components.".into(),
         ));
     }
     let mut unique = std::collections::HashSet::new();
@@ -1082,7 +1098,6 @@ pub fn install_bundle(
                 {
                     component.name = name.chars().take(120).collect();
                 }
-                retoc::require_install_consent(&component, item.allow_unverified)?;
                 Ok(component)
             })
             .collect::<Result<Vec<_>>>()?
@@ -1110,85 +1125,85 @@ pub fn install_bundle(
     let (game_info, game_path) = require_game(&ctx)?;
     deployment::ensure_game_stopped()?;
     let mut conn = connection(&ctx)?;
-    for component in &staged {
-        if let Some(replaced) = replaced_by(&conn, component)? {
-            return Err(AppError::Other(format!(
-                "{} would update {}. Atomic multi-component updates are not enabled yet; install update components individually.",
-                component.name, replaced.name
-            )));
-        }
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before updating mods.".into(),
+        ));
     }
-    let previous_packaged_order = ordered_supported(&conn)?;
-    let previous_ue4ss_order = load_order::state(&conn)?
-        .ue4ss_entries
-        .into_iter()
-        .map(|entry| entry.id)
-        .collect::<Vec<_>>();
-    let bundle_id = uuid::Uuid::new_v4().to_string();
+    let all = database::list_mods(&conn)?;
+    let matched = staged
+        .iter()
+        .map(|item| replaced_by(&conn, item).map(|r| r.map(|r| r.mod_id)))
+        .collect::<Result<Vec<_>>>()?;
+    let old = match &replace_bundle_id {
+        Some(bundle) => {
+            let members = all
+                .iter()
+                .filter(|item| item.bundle_id.as_ref() == Some(bundle))
+                .cloned()
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                return Err(AppError::Other(
+                    "The selected package no longer exists. Inspect the archive again.".into(),
+                ));
+            }
+            if matched
+                .iter()
+                .flatten()
+                .any(|id| !members.iter().any(|m| &m.id == id))
+            {
+                return Err(AppError::Other(
+                    "This archive also replaces another mod. No files were changed.".into(),
+                ));
+            }
+            members
+        }
+        None if matched.iter().any(Option::is_some) => {
+            return Err(AppError::Other(
+                "Confirm the complete package update before installing.".into(),
+            ))
+        }
+        None => Vec::new(),
+    };
+    let bundle_id = replace_bundle_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let library = mods_dir(&ctx)?;
-    let installed = deployment::install_bundle(
-        &mut conn,
-        &library,
-        &game_path,
-        &staged,
-        game_info.steam_build_id,
-        &bundle_id,
-    )?;
-
-    let finish = (|| -> Result<()> {
-        for (component, summary) in staged.iter().zip(&installed) {
-            if let Some(manifest) = &component.manifest {
-                compatibility::install_author_manifest(&conn, &summary.id, manifest)?;
-                if let Some(nexus) = &manifest.nexus {
-                    if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
-                        database::set_nexus_ids(&conn, &summary.id, mod_id, file_id)?;
+    let installed =
+        crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |conn| {
+            let installed = crate::packages::deploy(
+                conn,
+                &library,
+                &game_path,
+                &staged,
+                &old,
+                &matched,
+                game_info.steam_build_id.clone(),
+                &bundle_id,
+            )?;
+            for (component, summary) in staged.iter().zip(&installed) {
+                if let Some(manifest) = &component.manifest {
+                    compatibility::install_author_manifest(conn, &summary.id, manifest)?;
+                    if let Some(nexus) = &manifest.nexus {
+                        if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
+                            database::set_nexus_ids(conn, &summary.id, mod_id, file_id)?;
+                        }
                     }
                 }
             }
-        }
-        let ue4ss_order = load_order::state(&conn)?
-            .ue4ss_entries
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
-        load_order::apply_ue4ss_order(&mut conn, &game_path, &ue4ss_order)?;
-        let packaged_order = ordered_supported(&conn)?;
-        load_order::apply(
-            &mut conn,
-            &packaged_order,
-            &ctx.data_dir.join("load-order-operation.json"),
-        )?;
-        profiles::capture_active(&conn)?;
-        Ok(())
-    })();
-    if let Err(error) = finish {
-        let rollback = deployment::rollback_bundle(&conn, &library, &game_path, &installed);
-        let packaged_restore = load_order::apply(
-            &mut conn,
-            &previous_packaged_order,
-            &ctx.data_dir.join("load-order-operation.json"),
-        );
-        let ue4ss_restore =
-            load_order::apply_ue4ss_order(&mut conn, &game_path, &previous_ue4ss_order);
-        let detail = [
-            rollback.err().map(|value| value.to_string()),
-            packaged_restore.err().map(|value| value.to_string()),
-            ue4ss_restore.err().map(|value| value.to_string()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("; ");
-        return Err(if detail.is_empty() {
-            AppError::Other(format!(
-                "The bundle was not installed. Every component was rolled back. {error}"
-            ))
-        } else {
-            AppError::Other(format!(
-                "The bundle failed and recovery needs attention. {error}. Recovery: {detail}"
-            ))
-        });
-    }
+            let ue4ss_order = load_order::state(conn)?
+                .ue4ss_entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            load_order::apply_ue4ss_order(conn, &game_path, &ue4ss_order)?;
+            let packaged_order = ordered_supported(conn)?;
+            load_order::apply(
+                conn,
+                &packaged_order,
+                &ctx.data_dir.join("load-order-operation.json"),
+            )?;
+            profiles::capture_active(conn)?;
+            Ok(installed)
+        })?;
 
     // Staging is consumed only after deployment, metadata, ordering and active
     // profile capture all succeed.
@@ -1239,33 +1254,35 @@ pub fn set_mod_enabled(
     force: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<()> {
-    let (_, game_path) = require_game(&ctx)?;
-    let conn = connection(&ctx)?;
-    let library = mods_dir(&ctx)?;
-    deployment::set_enabled(&conn, &library, &game_path, &id, enabled, force)?;
-    profiles::capture_active(&conn)?;
-    let _ = operations::record(
-        &conn,
-        if enabled { "enable" } else { "disable" },
-        "completed",
-        if enabled {
-            "Mod enabled"
-        } else {
-            "Mod disabled"
-        },
-        serde_json::json!({"modId": &id}),
-    );
-    log(
-        &ctx,
-        "info",
-        if enabled {
-            "mod_enabled"
-        } else {
-            "mod_disabled"
-        },
-        &format!("mod_id={id}"),
-    );
-    Ok(())
+    package_operation(&ctx, || {
+        let (_, game_path) = require_game(&ctx)?;
+        let conn = connection(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        deployment::set_enabled(&conn, &library, &game_path, &id, enabled, force)?;
+        profiles::capture_active(&conn)?;
+        let _ = operations::record(
+            &conn,
+            if enabled { "enable" } else { "disable" },
+            "completed",
+            if enabled {
+                "Mod enabled"
+            } else {
+                "Mod disabled"
+            },
+            serde_json::json!({"modId": &id}),
+        );
+        log(
+            &ctx,
+            "info",
+            if enabled {
+                "mod_enabled"
+            } else {
+                "mod_disabled"
+            },
+            &format!("mod_id={id}"),
+        );
+        Ok(())
+    })
 }
 
 /// Keeps a mod out of the library list without touching what is deployed.
@@ -1284,21 +1301,69 @@ pub fn set_mod_hidden(id: String, hidden: bool, ctx: State<'_, AppContext>) -> R
 }
 
 #[tauri::command]
-pub fn uninstall_mod(id: String, force: bool, ctx: State<'_, AppContext>) -> Result<()> {
-    let game_path = game(&ctx)?.path.map(PathBuf::from);
-    let conn = connection(&ctx)?;
+pub fn uninstall_bundle(id: String, ctx: State<'_, AppContext>) -> Result<()> {
+    let game_path = game(&ctx)?.path.map(PathBuf::from).ok_or_else(|| {
+        AppError::Other("Connect the game folder before removing a package.".into())
+    })?;
     let library = mods_dir(&ctx)?;
-    deployment::uninstall(&conn, &library, &id, force, game_path.as_deref())?;
-    profiles::capture_active(&conn)?;
-    let _ = operations::record(
-        &conn,
-        "uninstall",
-        "completed",
-        "Mod uninstalled",
-        serde_json::json!({"modId": &id}),
-    );
-    log(&ctx, "info", "mod_uninstalled", &format!("mod_id={id}"));
-    Ok(())
+    let mut conn = connection(&ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before removing mods.".into(),
+        ));
+    }
+    let mods = database::list_mods(&conn)?;
+    let anchor = mods
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| AppError::Other("This mod is no longer installed.".into()))?;
+    let ids = mods
+        .iter()
+        .filter(|item| {
+            item.id == id || (anchor.bundle_id.is_some() && item.bundle_id == anchor.bundle_id)
+        })
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    deployment::validate_removal(&conn, &ids)?;
+    crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |conn| {
+        for member in &ids {
+            deployment::uninstall(conn, &library, member, false, Some(&game_path))?;
+        }
+        profiles::capture_active(conn)?;
+        operations::record(
+            conn,
+            "bundle-uninstall",
+            "completed",
+            "Package removed",
+            serde_json::json!({"modIds":ids}),
+        )?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub fn uninstall_mod(id: String, force: bool, ctx: State<'_, AppContext>) -> Result<()> {
+    package_operation(&ctx, || {
+        if database::get_setting(&connection(&ctx)?, "pending_restore_profile")?.is_some() {
+            return Err(AppError::Other(
+                "Restore the temporary launch profile before removing mods.".into(),
+            ));
+        }
+        let game_path = game(&ctx)?.path.map(PathBuf::from);
+        let conn = connection(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        deployment::uninstall(&conn, &library, &id, force, game_path.as_deref())?;
+        profiles::capture_active(&conn)?;
+        let _ = operations::record(
+            &conn,
+            "uninstall",
+            "completed",
+            "Mod uninstalled",
+            serde_json::json!({"modId": &id}),
+        );
+        log(&ctx, "info", "mod_uninstalled", &format!("mod_id={id}"));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -1373,30 +1438,39 @@ pub struct UpdateInfo {
     pub latest_version: String,
     pub release_url: String,
     pub update_available: bool,
-}
-
-fn version_parts(version: &str) -> Option<Vec<u64>> {
-    version
-        .trim_start_matches(['v', 'V'])
-        .split('.')
-        .map(|part| {
-            part.split_once('-')
-                .map_or(part, |(number, _)| number)
-                .parse()
-                .ok()
-        })
-        .collect()
+    pub release_available: bool,
 }
 
 fn version_is_newer(latest: &str, current: &str) -> bool {
-    let (Some(mut latest), Some(mut current)) = (version_parts(latest), version_parts(current))
-    else {
-        return latest.trim_start_matches(['v', 'V']) != current.trim_start_matches(['v', 'V']);
-    };
-    let width = latest.len().max(current.len());
-    latest.resize(width, 0);
-    current.resize(width, 0);
-    latest > current
+    match (
+        semver::Version::parse(latest.trim_start_matches(['v', 'V'])),
+        semver::Version::parse(current.trim_start_matches(['v', 'V'])),
+    ) {
+        (Ok(latest), Ok(current)) => latest > current,
+        _ => false,
+    }
+}
+fn select_release(value: &serde_json::Value, allow_prerelease: bool) -> Option<&serde_json::Value> {
+    let items = value
+        .as_array()
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![value]);
+    items
+        .into_iter()
+        .filter(|item| item["draft"].as_bool() != Some(true))
+        .filter_map(|item| {
+            let version =
+                semver::Version::parse(item["tag_name"].as_str()?.trim_start_matches(['v', 'V']))
+                    .ok()?;
+            if !allow_prerelease
+                && (!version.pre.is_empty() || item["prerelease"].as_bool() == Some(true))
+            {
+                return None;
+            }
+            Some((version, item))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, item)| item)
 }
 
 /// Queries the latest published GitHub release. The interface calls this once
@@ -1409,21 +1483,48 @@ pub async fn check_for_updates() -> Result<UpdateInfo> {
         )
     })?;
     let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let allow_prerelease = !semver::Version::parse(&current_version)
+        .map_err(|e| AppError::Other(e.to_string()))?
+        .pre
+        .is_empty();
+    let endpoint = if allow_prerelease {
+        format!("{}?per_page=30", release_api.trim_end_matches("/latest"))
+    } else {
+        release_api.to_string()
+    };
+    let unavailable = || UpdateInfo {
+        current_version: current_version.clone(),
+        latest_version: current_version.clone(),
+        release_url: format!(
+            "{}/releases",
+            option_env!("ZERO_MOD_MANAGER_PROJECT_URL").unwrap_or("")
+        ),
+        update_available: false,
+        release_available: false,
+    };
     let response = reqwest::Client::builder()
         .user_agent(format!("zero-mod-manager/{current_version}"))
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| AppError::Network(error.to_string()))?
-        .get(release_api)
+        .get(endpoint)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
         .map_err(|error| AppError::Network(error.to_string()))?;
-    let release: serde_json::Value = response
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(unavailable());
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|error| AppError::Network(error.to_string()))?;
+    let payload: serde_json::Value = response
         .json()
         .await
         .map_err(|error| AppError::Network(error.to_string()))?;
+    let Some(release) = select_release(&payload, allow_prerelease) else {
+        return Ok(unavailable());
+    };
     let tag = release["tag_name"]
         .as_str()
         .ok_or_else(|| AppError::Other("GitHub returned a release without a version.".into()))?;
@@ -1433,6 +1534,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo> {
     let latest_version = tag.trim_start_matches(['v', 'V']).to_string();
     Ok(UpdateInfo {
         update_available: version_is_newer(&latest_version, &current_version),
+        release_available: true,
         current_version,
         latest_version,
         release_url: release_url.to_string(),
@@ -1496,9 +1598,6 @@ pub fn get_settings(ctx: State<'_, AppContext>) -> Result<AppSettings> {
 pub fn save_settings(mut settings: AppSettings, ctx: State<'_, AppContext>) -> Result<()> {
     if settings.game_path.as_deref() == Some("") {
         settings.game_path = None
-    }
-    if settings.retoc_path.as_deref() == Some("") {
-        settings.retoc_path = None
     }
     if settings
         .seven_zip_path
@@ -1807,26 +1906,29 @@ fn configured_executable(settings: &AppSettings) -> Result<Option<(PathBuf, Path
     Ok(Some((executable, working_directory)))
 }
 
+fn validate_launch_file(executable: &Path) -> Result<()> {
+    if !executable.is_file() || std::fs::metadata(executable)?.len() == 0 {
+        return Err(AppError::Other("The game executable is missing or empty. Choose a valid game installation in Settings before launching.".into()));
+    }
+    Ok(())
+}
+
 fn perform_launch(app: &AppHandle, ctx: &AppContext) -> Result<String> {
-    let settings = database::settings(&connection(&ctx)?)?;
+    let settings = database::settings(&connection(ctx)?)?;
     if let Some((executable, working_directory)) = configured_executable(&settings)? {
-        std::process::Command::new(&executable)
-            .current_dir(&working_directory)
-            .spawn()
-            .map_err(|error| {
-                AppError::Other(format!(
-                    "The custom game executable could not be launched: {error}. Choose a compatible executable or launcher in Settings."
-                ))
-            })?;
+        validate_launch_file(&executable)?;
+        crate::launcher::launch(&executable, &working_directory)
+            .map_err(|error| AppError::Other(crate::launcher::error_message(&error)))?;
         log(
-            &ctx,
+            ctx,
             "info",
             "game_launch_requested",
             &format!("source=custom_executable path={}", executable.display()),
         );
         return Ok("custom-executable".into());
     }
-    let (game_info, game_path) = require_game(&ctx)?;
+    let (game_info, game_path) = require_game(ctx)?;
+    validate_launch_file(&game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe"))?;
     if game_info.source == "ea" {
         let executable = game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe");
         let working_directory = executable.parent().unwrap_or(&game_path);
@@ -1850,7 +1952,7 @@ fn perform_launch(app: &AppHandle, ctx: &AppContext) -> Result<String> {
     if steam::running_from_appimage() {
         steam::launch_from_appimage()?;
         log(
-            &ctx,
+            ctx,
             "info",
             "game_launch_requested",
             "source=steam_uri appimage_environment=sanitized",
@@ -1860,7 +1962,7 @@ fn perform_launch(app: &AppHandle, ctx: &AppContext) -> Result<String> {
     app.opener()
         .open_url(steam::launch_url(), None::<String>)
         .map_err(|error| AppError::Other(format!("Steam could not launch the game: {error}")))?;
-    log(&ctx, "info", "game_launch_requested", "source=steam_uri");
+    log(ctx, "info", "game_launch_requested", "source=steam_uri");
     Ok("steam".into())
 }
 
@@ -2294,7 +2396,9 @@ fn restore_temporary_profile(
             "Restored the profile after a temporary launch",
             serde_json::json!({"profileId": profile_id, "error": result.err().map(|error| error.to_string())}),
         );
-        let _ = database::delete_setting(&conn, "pending_restore_profile");
+        if status == "completed" {
+            let _ = database::delete_setting(&conn, "pending_restore_profile");
+        }
     }
 }
 
@@ -2337,6 +2441,7 @@ pub fn launch_game_mode(
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe"));
+    validate_launch_file(&executable)?;
     let executable_sha256 = executable
         .is_file()
         .then(|| deployment::sha256(&executable))
@@ -2386,7 +2491,7 @@ pub fn launch_game_mode(
             if mode != "modded" {
                 let mut rollback = connection(&ctx)?;
                 let library = mods_dir(&ctx)?;
-                let _ = profiles::activate(
+                let restored = profiles::activate(
                     &mut rollback,
                     &library,
                     &game_path,
@@ -2394,7 +2499,9 @@ pub fn launch_game_mode(
                     &active.summary.id,
                     game_info.steam_build_id,
                 );
-                let _ = database::delete_setting(&rollback, "pending_restore_profile");
+                if restored.is_ok() {
+                    let _ = database::delete_setting(&rollback, "pending_restore_profile");
+                }
             }
             return Err(error);
         }
@@ -2525,8 +2632,7 @@ pub fn create_support_bundle(
         game.path.as_deref().map(Path::new),
         game.compat_data_path.as_deref().map(Path::new),
     );
-    let retoc = tool(&ctx)?;
-    let diagnostics = diagnostics::run(&conn, &game, &runtime, &retoc)?;
+    let diagnostics = diagnostics::run(&conn, &game, &runtime, &tool(&ctx)?)?;
     let compatibility = compatibility::report(&conn)?;
     let active = profiles::active(&conn)?;
     let lock = active
@@ -2538,7 +2644,7 @@ pub fn create_support_bundle(
     let application = serde_json::json!({
         "application": "Zero Mod Manager", "version": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS, "architecture": std::env::consts::ARCH,
-        "game": game, "runtime": runtime, "retoc": retoc,
+        "game": game, "runtime": runtime,
     });
     let compatibility_value = serde_json::to_value(compatibility)?;
     let lock_value = lock.map(serde_json::to_value).transpose()?;
@@ -2578,6 +2684,10 @@ mod update_tests {
         assert!(version_is_newer("0.1.10", "0.1.9"));
         assert!(!version_is_newer("v0.1.4", "0.1.4"));
         assert!(!version_is_newer("0.1.3", "0.1.4"));
+        assert!(version_is_newer("0.7.0", "0.7.0-rc.2"));
+        assert!(version_is_newer("0.7.0-rc.10", "0.7.0-rc.2"));
+        assert!(!version_is_newer("0.7.0-rc.2", "0.7.0"));
+        assert!(!version_is_newer("invalid", "0.7.0"));
     }
 
     #[test]
@@ -2664,6 +2774,17 @@ mod update_tests {
     }
 
     #[test]
+    fn missing_or_empty_launch_file_is_rejected_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("game.exe");
+        assert!(super::validate_launch_file(&exe).is_err());
+        std::fs::write(&exe, []).unwrap();
+        assert!(super::validate_launch_file(&exe).is_err());
+        std::fs::write(&exe, b"test-fixture").unwrap();
+        assert!(super::validate_launch_file(&exe).is_ok());
+    }
+
+    #[test]
     fn reports_a_missing_custom_launch_executable() {
         let settings = AppSettings {
             custom_executable_path: Some("/missing/ZeroCompany.exe".into()),
@@ -2705,7 +2826,6 @@ mod update_tests {
             files,
             packages: Vec::new(),
             verification: "passed".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         };

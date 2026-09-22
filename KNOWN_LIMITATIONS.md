@@ -1,11 +1,11 @@
-# Known Limitations — 0.7.0-rc.1
+# Known Limitations — 0.7.0-rc.2
 
 - Nexus integration is removed. Download archives in a browser and use Install.
   Reassign old nxm associations in Vortex if needed.
-- Missing retoc can be bypassed only with explicit consent. Container integrity
-  and package-level overlaps then remain unverified; failed checks stay blocked.
-- UE4SS, retoc, 7-Zip, and NanaZip are never silently bundled or downloaded.
-  0.7.0-rc.1 supports explicit local tool selection and verified local package
+- Container content/asset verification is not performed. IoStore companion-file checks,
+  archive safety, file checksums and destination ownership checks remain enabled.
+- UE4SS, 7-Zip, and NanaZip are never silently bundled or downloaded.
+  0.7.0-rc.2 supports explicit local tool selection and verified local package
   installation; the signed tool-source catalog and consent-driven official
   downloader are a remaining Stable gate.
 - The compatibility engine accepts and verifies signed Catalog v1 envelopes,
@@ -23,11 +23,19 @@
 - The top-60 Nexus review in `docs/NEXUS-60-MOD-AUDIT.md` is based on published
   file trees and installation instructions. It does not grant a Verified badge
   without the corresponding archive and a real-game result.
-- Fresh hybrid downloads now install through one backend transaction, retain a
-  shared bundle identity, and roll back every completed component if any later
-  deployment, metadata, ordering, or profile-capture step fails. Bundles that
-  also replace installed components remain on the individually reversible
-  update path; full all-component update rollback is still a Stable gate.
+- Package installation, full replacement and removal use a persistent file/SQLite
+  rollback journal. Interrupted operations restore automatically on startup, not
+  through a user-selectable recovery wizard. Recovery is blocked while the game
+  runs or when backup integrity cannot be established.
+- Complete replacement requires confirmation; omitted components are removed.
+  The explicit package target handles renamed archives. Component-only updates
+  retain their package identity but do not retire other components.
+- Package enable/disable and multi-selection cleanup currently run component
+  operations sequentially. Each component has rollback protection, but the whole
+  selection is not a single atomic transaction.
+- Recovery history is retained under `package-recovery` in application data and
+  can consume significant disk space. There is not yet an automatic retention
+  policy or cleanup UI. Do not manually change a pending `package-operation`.
 - Loose root `Engine.ini` presets remain blocked. Installing them as whole-file
   replacements would erase unrelated settings, so they will enter support only
   through semantic INI diff/merge and profile rollback.
@@ -63,10 +71,9 @@
 - UE4SS start order covers `mods.txt` only. BPModLoader keeps its own list in
   `BPModLoaderMod/load_order.txt` for blueprint mods, which the manager still
   preserves rather than writes, so blueprint load order stays manual.
-- Install, removal, update, profile, runtime, and config operations use recovery
-  records and rollback points. A forced machine loss can still require the
-  recovery choice shown on next launch; users should not manually edit the
-  managed library while recovery is pending.
+- Recovery mechanisms differ between package, profile, runtime and config
+  operations; do not assume every application action uses the package journal.
+  Avoid editing the managed library while an operation or recovery is pending.
 - Game-folder mods are recognized from three layouts: a tree containing
   `SWZeroCompany`, a `LogicMods` blueprint pack, and a loader shim named after
   the system library it replaces (`dxgi.dll`, `dinput8.dll`, and similar) with
@@ -86,8 +93,7 @@
   folder as the working directory and does not add command-line arguments. On
   Linux, select a native launcher or wrapper rather than a Windows executable
   that the host cannot run directly.
-- retoc can verify only containers supported by retoc 0.1.5. Encrypted or future
-  game container formats may require an upstream update.
+- Encrypted or future container formats are not validated by a content parser.
 - PAK-only mods cannot provide package-level overlap metadata; only destination
   filename collision is available for them.
 - Load-order management is enabled for IoStore triplets with a companion PAK,

@@ -7,6 +7,11 @@ import { AboutPage } from "./AboutPage";
 afterEach(cleanup);
 
 describe("About update status", () => {
+  it("does not call an unpublished release up to date or an error", () => {
+    render(<AboutPage projectUrl="https://github.com/stellamarislabs/zero-mod-manager" nexusUrl="" onOpenLink={vi.fn()} update={{currentVersion:"0.7.0-rc.2",latestVersion:"0.7.0-rc.2",releaseUrl:"",updateAvailable:false,releaseAvailable:false}} checking={false} error={null} onCheckUpdates={vi.fn()} />);
+    expect(screen.getByText("No public release is available yet.")).toBeTruthy();
+    expect(screen.queryByText(/You’re up to date/)).toBeNull();
+  });
   it("shows the startup result and opens the published release", async () => {
     const onOpenLink = vi.fn();
     render(<AboutPage
@@ -41,7 +46,9 @@ describe("About update status", () => {
       onCheckUpdates={onCheckUpdates}
     />);
 
-    expect(screen.getByText(/Couldn’t check GitHub: Network unavailable/)).toBeTruthy();
+    expect(screen.getByText(/Updates could not be checked/)).toBeTruthy();
+    await userEvent.click(screen.getByText("Technical details"));
+    expect(screen.getByText("Network unavailable")).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Check again" }));
     expect(onCheckUpdates).toHaveBeenCalledOnce();
   });

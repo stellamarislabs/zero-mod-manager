@@ -10,7 +10,6 @@ afterEach(cleanup);
 const settings: AppSettings = {
   gamePath: null,
   customExecutablePath: "C:\\Games\\ZeroCompany.exe",
-  retocPath: null,
   sevenZipPath: null,
   logLevel: "normal",
   advancedPackageNames: false,
@@ -20,7 +19,7 @@ const settings: AppSettings = {
 function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Parameters<typeof SettingsPage>[0] {
   return {
     settings,
-    retoc: { found: true, path: "/bin/retoc", version: "retoc 0.1.5" },
+
     sevenZip: { found: true, path: "C:\\Program Files\\7-Zip\\7z.exe", version: "7-Zip 24.09" },
     managedLibrary: { path: "C:\\ZCOM Mods", defaultPath: "C:\\Users\\Arc\\AppData\\Local\\ZCOM Mods", isDefault: false },
     movingLibrary: false,
@@ -28,7 +27,6 @@ function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Par
     onSave: vi.fn(),
     onPickGame: vi.fn(),
     onPickExecutable: vi.fn(),
-    onPickRetoc: vi.fn(),
     onPickSevenZip: vi.fn(),
     onMoveLibrary: vi.fn(),
     onUseDefaultLibrary: vi.fn(),
@@ -80,10 +78,10 @@ describe("managed mod library", () => {
 });
 
 describe("local tools", () => {
-  it("has no account or API controls and describes retoc as optional", () => {
-    render(<SettingsPage {...props({ retoc: { found: false, path: null, version: null } })} />);
+  it("has no account, API or container-tool controls", () => {
+    render(<SettingsPage {...props()} />);
     expect(screen.queryByText(/API key/i)).toBeNull();
     expect(screen.queryByRole("checkbox", { name: /Check installed mods for updates/ })).toBeNull();
-    expect(screen.getByRole("heading", { name: "Container verification (optional)" })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: /Container verification/ })).toBeNull();
   });
 });

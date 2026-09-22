@@ -1,13 +1,13 @@
 # 0.7 release qualification matrix
 
-`0.7.0-rc.1` is a release candidate, not a certification of all planned features.
+`0.7.0-rc.2` is a release candidate, not a certification of all planned features.
 Game acceptance is pending. Evidence below distinguishes automated checks from
 manual platform qualification. Last local test record: 2026-09-22.
 
 ## Automated gates
 
 - Rust unit/integration suite and React component suite pass. Current local RC
-  evidence: 147 Rust tests passed, 3 fixture-dependent tests ignored; 79 React
+  evidence: 157 Rust tests passed, 3 fixture-dependent tests ignored; 93 React
   tests passed; TypeScript/Vite production build and native Rust release build
   passed on Windows 11.
 - Manifest v1/v2, Profile Lock v1, and Catalog v1 schema and round-trip tests pass.
@@ -21,11 +21,14 @@ manual platform qualification. Last local test record: 2026-09-22.
 - Release requirement: no open P0/P1. Formal issue triage remains pending;
   known implementation limits are documented in `KNOWN_LIMITATIONS.md`.
 
-The three ignored Rust tests require legal local copies of an IoStore triplet,
-mod archives, and a UE4SS distribution package. They are release qualification
-tests, not silently waived coverage. Clippy is also a CI gate; the local host
-does not currently have the component installed. Rust formatting was checked
-locally after the release-preparation changes; hosted CI is not yet signed off.
+The default suite skips three external-fixture tests. Two were separately run
+and passed on 2026-09-22: five local mod ZIPs (including both Operations Tweaks
+variants and the four-component Ship Paint package), and a copied IoStore
+triplet rename/byte-preservation check. These do not prove in-game compatibility.
+The UE4SS distribution fixture test remains pending. Clippy with all targets,
+all features and warnings denied passed locally. Production npm audit reported
+zero vulnerabilities; this is not an audit of every dependency or native payload.
+Hosted CI and Linux builds are not signed off. WSL is not installed on this host.
 
 ## Stable blockers outside the local automated suite
 
@@ -33,7 +36,8 @@ locally after the release-preparation changes; hosted CI is not yet signed off.
 - Provision the public signed compatibility catalog, production key, and URLs.
 - Finish the consent-driven, hash-pinned official runtime/tool downloader.
 - Route all user-visible copy through the English message catalog.
-- Configure product repository, issue tracker, update, catalog, and Nexus URLs.
+- Product repository/issue/update URLs use stellamarislabs/zero-mod-manager.
+  Public catalog and continuation Nexus listing still need configuration.
 - Configure detached release signing and validate signature verification. Local RC EXE/installer: NotSigned.
   Unsigned distribution instructions: `RELEASE-SECURITY.md`.
 

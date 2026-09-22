@@ -7,6 +7,18 @@ import { Shell, type Page } from "./Shell";
 
 afterEach(cleanup);
 describe("persistent application controls", () => {
+  it("requires explicit confirmation before troubleshooting", async () => {
+    const onLaunchMode = vi.fn();
+    render(<LaunchControls status="ready" canLaunch launching={false} onHealth={vi.fn()} onLaunchGame={vi.fn()} onLaunchMode={onLaunchMode} onProfiles={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Troubleshoot" }));
+    expect(onLaunchMode).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onLaunchMode).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Troubleshoot" }));
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onLaunchMode).toHaveBeenCalledExactlyOnceWith("troubleshoot");
+  });
   it("keeps the same sidebar and toolbar nodes across navigation", () => {
     const toolbar = <LaunchControls status="unverified" canLaunch launching={false} onHealth={vi.fn()} onLaunchGame={vi.fn()} onLaunchMode={vi.fn()} onProfiles={vi.fn()} />;
     const app = (page: Page) => <Shell page={page} onPage={vi.fn()} gameReady updateAvailable={false} toolbar={toolbar}><h1>{page}</h1></Shell>;

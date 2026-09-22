@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::{collections::BTreeMap, path::Path};
 
 pub fn open(path: &Path) -> Result<Connection> {
+    crate::package_transaction::check_available(path)?;
     let mut connection = Connection::open(path)?;
     connection.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -425,7 +426,6 @@ pub fn settings(conn: &Connection) -> Result<AppSettings> {
         game_path: get_setting(conn, "game_path")?,
         custom_executable_path: get_setting(conn, "custom_executable_path")?
             .filter(|path| !path.trim().is_empty()),
-        retoc_path: get_setting(conn, "retoc_path")?,
         seven_zip_path: get_setting(conn, "seven_zip_path")?.filter(|path| !path.trim().is_empty()),
         log_level: get_setting(conn, "log_level")?.unwrap_or_else(|| "normal".into()),
         advanced_package_names: bool_value("advanced_package_names")?,
@@ -440,7 +440,6 @@ pub fn save_settings(conn: &Connection, value: &AppSettings) -> Result<()> {
             "custom_executable_path",
             value.custom_executable_path.clone().unwrap_or_default(),
         ),
-        ("retoc_path", value.retoc_path.clone().unwrap_or_default()),
         (
             "seven_zip_path",
             value.seven_zip_path.clone().unwrap_or_default(),
@@ -468,16 +467,18 @@ pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
     Ok(())
 }
 
+// Source archive identity groups older, individually installed components too.
+// Do not infer membership from a display name or from a shared directory.
 pub fn counts(conn: &Connection) -> Result<(usize, usize)> {
-    let total: i64 = conn.query_row("SELECT count(*) FROM mods", [], |r| r.get(0))?;
-    let enabled: i64 = conn.query_row("SELECT count(*) FROM mods WHERE enabled=1", [], |r| {
+    let total: i64 = conn.query_row("SELECT count(DISTINCT COALESCE(COALESCE(bundle_id, CASE WHEN lower(source_archive) LIKE '%.zip' OR lower(source_archive) LIKE '%.7z' OR lower(source_archive) LIKE '%.rar' THEN 'archive:' || source_archive END),id)) FROM mods", [], |r| r.get(0))?;
+    let enabled: i64 = conn.query_row("SELECT count(DISTINCT COALESCE(COALESCE(bundle_id, CASE WHEN lower(source_archive) LIKE '%.zip' OR lower(source_archive) LIKE '%.7z' OR lower(source_archive) LIKE '%.rar' THEN 'archive:' || source_archive END),id)) FROM mods WHERE enabled=1", [], |r| {
         r.get(0)
     })?;
     Ok((total as usize, enabled as usize))
 }
 
 pub fn list_mods(conn: &Connection) -> Result<Vec<ModSummary>> {
-    let mut stmt = conn.prepare("SELECT id,name,version,mod_type,enabled,installed_at,installed_build,load_priority,nexus_mod_id,hidden,nexus_ignored,EXISTS(SELECT 1 FROM fomod_installs f WHERE f.mod_id=mods.id),bundle_id FROM mods ORDER BY installed_at DESC")?;
+    let mut stmt = conn.prepare("SELECT id,name,version,mod_type,enabled,installed_at,installed_build,load_priority,nexus_mod_id,hidden,nexus_ignored,EXISTS(SELECT 1 FROM fomod_installs f WHERE f.mod_id=mods.id),COALESCE(bundle_id, CASE WHEN lower(source_archive) LIKE '%.zip' OR lower(source_archive) LIKE '%.7z' OR lower(source_archive) LIKE '%.rar' THEN 'archive:' || source_archive END) FROM mods ORDER BY installed_at DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -927,6 +928,28 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
+    }
+
+    #[test]
+    fn library_counts_packages_instead_of_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("grouping.sqlite")).unwrap();
+        for (id, bundle, archive) in [
+            ("one", Some("bundle"), None),
+            ("two", Some("bundle"), None),
+            ("three", None, Some("C:/Downloads/pack.zip")),
+            ("four", None, Some("C:/Downloads/pack.zip")),
+            ("five", None, None),
+        ] {
+            conn.execute("INSERT INTO mods(id,name,mod_type,installed_at,enabled,bundle_id,source_archive) VALUES(?1,'Same name','pak','2026-09-22',1,?2,?3)", rusqlite::params![id,bundle,archive]).unwrap();
+        }
+        assert_eq!(counts(&conn).unwrap(), (3, 3));
+        let mods = list_mods(&conn).unwrap();
+        let find = |id: &str| mods.iter().find(|m| m.id == id).unwrap().bundle_id.clone();
+        assert_eq!(find("one"), find("two"));
+        assert_eq!(find("three"), find("four"));
+        assert_ne!(find("one"), find("three"));
+        assert!(find("five").is_none());
     }
 
     #[test]
