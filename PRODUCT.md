@@ -10,7 +10,7 @@ Star Wars: Zero Company players who install packaged, Unreal plugin, UE4SS, and 
 
 ## Product Purpose
 
-Zero Mod Manager is the maintained community continuation of ZCOM Mod Manager 0.6.5. It keeps the original task-focused workflow while fixing current startup, Linux, plugin, configuration, Nexus, and diagnostics failures. Success means users can inspect, install, update, disable, repair, and remove supported mods without unexplained writes or data loss.
+Zero Mod Manager is the maintained community continuation of ZCOM Mod Manager 0.6.5. It keeps the original task-focused workflow while fixing current startup, Linux, plugin, configuration and diagnostics failures. Success means users can inspect, install, update, disable, repair, and remove supported mods without unexplained writes or data loss.
 
 ## Brand Personality
 
@@ -34,7 +34,7 @@ Tactical, trustworthy, restrained. The interface should feel like a calm operati
 2. Make state actionable: every invalid path, failed check, conflict, or unsupported package names the cause and next safe action.
 3. Earn trust through reversibility: preview writes, track ownership, back up replacements, and expose rollback outcomes.
 4. Keep advanced detail available without forcing it into the primary workflow.
-5. Distinguish verified health from assumptions, especially for Linux/Proton, Nexus, and experimental EA App support.
+5. Distinguish verified health from assumptions, especially for Linux/Proton and experimental EA App support.
 
 ## Accessibility & Inclusion
 

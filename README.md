@@ -15,7 +15,7 @@ Zero Mod Manager understands Zero Company mod payloads instead of
 treating them as arbitrary files. It discovers Steam installations, validates
 IoStore containers with retoc, manages UE4SS script and DLL mods, installs
 game-folder mods such as ReShade, detects package overlap,
-records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
+records SHA-256 ownership, and includes Linux/Proton-specific diagnostics (platform qualification is pending).
 
 > Zero Mod Manager is an independent continuation based on ZCOM Mod Manager
 > 0.6.5. It is not an official arctco release. This project is not affiliated with or
@@ -41,7 +41,7 @@ The current local Windows packages are unsigned. Game acceptance is pending.
   snapshots, and Last Known Good checkpoints
 - Modded, temporary vanilla, and controlled troubleshoot launch sessions with
   crash-safe profile restoration and user-labelled outcomes
-- Signed community compatibility catalog with Ed25519 verification, expiry,
+- Compatibility catalog verification infrastructure (public catalog not yet provisioned), with Ed25519, expiry,
   rollback protection, evidence provenance, and offline last-known-good cache
 - Config Workbench for validated INI, JSON, and TOML changes, diff, backup, and
   rollback; Lua remains read-only
@@ -75,12 +75,9 @@ The current local Windows packages are unsigned. Game acceptance is pending.
 - UE4SS layout checks and formatting-preserving `mods.txt` updates
 - Guided UE4SS runtime installation from a package you downloaded yourself
 
-- On-demand update checking, with MD5 identification for mods installed before
-  the manager tracked provenance and an opt-in throttled check at start-up
 - Linux compatdata and Proton DLL-override diagnostics
 - Sanitized structured logs and a copyable Mod Doctor report
-- Release checking that remains disabled until the continuation repository and
-  Nexus page are explicitly configured at build time
+- Application release checking against this continuation's GitHub releases (not mod updates)
 - No account or always-on network requirement, telemetry, analytics, or advertisements
 
 ## Screenshots
@@ -100,8 +97,8 @@ project's own zero-ring mark, drawn as plain SVG in `src/assets/icon.svg`.
 | Linux | x86_64 | AppImage and `.deb` |
 | Windows 10/11 | x86_64 | NSIS `.exe` installer and portable `.zip` |
 
-Steam Deck/SteamOS should work through the x86_64 Linux AppImage. Add it as a
-non-Steam application if desired. See [Known Limitations](KNOWN_LIMITATIONS.md)
+Steam Deck/SteamOS and Linux package qualification are pending; do not treat
+these build targets as tested platforms. See [Known Limitations](KNOWN_LIMITATIONS.md)
 for the current boundaries.
 
 ## Supported Mod Types
@@ -208,13 +205,13 @@ Download the package for your platform from the GitHub release:
 
 - Linux: make the AppImage executable and run it, or install the `.deb`.
 - Windows: run the NSIS installer, or extract the portable `.zip` anywhere and
-  run `Zero Mod Manager.exe`. Select a trusted retoc executable in Settings if
-  you install IoStore mods; third-party tools are not silently bundled. The portable
+  run `Zero Mod Manager.exe`. Optionally select a trusted retoc executable in Settings for
+  IoStore integrity checks; third-party tools are not silently bundled. The portable
   build also assumes the Microsoft Edge WebView2 runtime is already present,
   which it is on Windows 11 and on Windows 10 machines with current Edge; the
   installer downloads it when missing. Community builds are unsigned, so
-  Windows SmartScreen may show a warning. Verify the release checksum and
-  repository before choosing **Run anyway**.
+  Windows SmartScreen may show a warning. See docs/RELEASE-SECURITY.md;
+  do not disable Windows security protections.
 
 Release packages do not include retoc or an archive extractor. Select a trusted,
 host-installed retoc executable for IoStore verification. ZIP is built in; 7z
@@ -277,8 +274,8 @@ sandbox of their own and then read exactly like an ordinary download, so the
 result reaches the same review screen, with the same container verification,
 conflict detection, compatibility check, and naming, as any other mod. An
 archive holding sixteen mutually exclusive variants therefore becomes one mod
-entry rather than sixteen options to compare by hand, and the download it came
-from is still recorded, so update checking keeps working.
+entry rather than sixteen options to compare by hand, and its selected options
+remain recorded for later reconfiguration.
 
 After a guided install is confirmed, the manager retains the complete FOMOD
 source tree and the answers used—not only the selected payload. Its library row
@@ -488,8 +485,8 @@ Requirements:
 - `7z` for 7z archive installation/tests
 
 ```bash
-git clone <continuation-repository-url>
-cd ZeroModManager
+git clone https://github.com/stellamarislabs/zero-mod-manager.git
+cd zero-mod-manager
 npm ci
 npm run tauri build
 ```
@@ -542,22 +539,11 @@ schema/                      optional community manifest schema
 
 ## Release Builds
 
-CI builds the production executable on every main-branch push and pull request.
-Tags matching `v*` publish a GitHub release immediately and attach Linux
-AppImage/deb and Windows NSIS installer/portable zip artifacts. The release is
-not a draft, so bump the version in `package.json`, `package-lock.json`,
-`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`,
-then smoke-test both platforms before tagging. The release workflow rejects a
-tag that does not match those files.
-
-```bash
-npm run check:release-version -- v0.4.1
-git tag -s v0.7.0 -m "Zero Mod Manager 0.7.0"
-git push origin v0.7.0
-```
-
-Confirm checksums after the run finishes. See
-[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) before release.
+See [the release runbook](docs/RELEASE-RUNBOOK.md). Approved version tags prepare
+a **draft** release with binary packages, exact tagged source, and checksums.
+Nothing is automatically promoted to a public release. Stable requires the
+signing and game-qualification gates. For local Windows preparation, run
+`scripts/prepare-release.ps1` with PowerShell 7; it does not push or publish.
 
 ## Roadmap
 

@@ -48,7 +48,7 @@ All notable changes are documented here.
   compatibility, diagnostic, and bounded log evidence. Credentials, personal
   paths, and save contents are excluded or redacted; bundles are never uploaded.
 - Steam, EA App metadata, and manual launcher profiles; activity history;
-  exact Nexus old-file to new-file update lineage; and public Manifest v2,
+  local-first manual archive installation; and public Manifest v2,
   Profile Lock v1, and Compatibility Catalog v1 contracts.
 
 ### Security
