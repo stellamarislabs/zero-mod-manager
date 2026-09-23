@@ -1,13 +1,17 @@
 use crate::{
-    adoption, archives, database, deployment, diagnostics,
+    adoption, archives, compatibility, config_workbench, database, deployment, diagnostics,
     error::{AppError, Result},
-    fomod, load_order,
+    fomod, isolation, load_order,
     models::{
-        AdoptionGroup, AdoptionReport, AppSettings, Dashboard, DiagnosticReport, ExistingModScan,
-        GameInfo, Inspection, LaunchReport, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo,
-        ModPreview, ModSummary, ModUpdate, ModUpdateReport, ReplacedMod, StagedMod, ToolInfo,
+        AdoptionGroup, AdoptionReport, AppSettings, BundleInstallItem, BundleInstallReport,
+        CompatibilityReport, ConfigChangePreview, ConfigDocument, ConfigPatchRecord, Dashboard,
+        DiagnosticReport, ExistingModScan, GameInfo, Inspection, IsolationSession, LaunchPreflight,
+        LaunchReport, LaunchSession, LoadOrderPreview, LoadOrderState, ManagedLibraryInfo,
+        ModPreview, ModSummary, OperationRecord, PackageAssessment, ProfileDetail, ProfileLock,
+        ProfileSummary, ProfileSwitchPreview, ReplacedMod, SnapshotSummary, StagedMod,
+        SupportBundlePreview, SupportBundleReport, ToolInfo,
     },
-    mods, retoc, steam, ue4ss, AppContext,
+    mods, operations, profiles, sessions, steam, support, ue4ss, AppContext,
 };
 use std::{
     path::{Path, PathBuf},
@@ -17,8 +21,125 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
+fn package_operation<T>(ctx: &AppContext, action: impl FnOnce() -> Result<T>) -> Result<T> {
+    let (_, game_path) = require_game(ctx)?;
+    let library = mods_dir(ctx)?;
+    let mut conn = connection(ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before changing mods.".into(),
+        ));
+    }
+    crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |_| action())
+}
+
 fn connection(ctx: &AppContext) -> Result<rusqlite::Connection> {
+    if ctx.reset_pending.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(AppError::Other(
+            "App reset is scheduled. Close and reopen Zero Mod Manager.".into(),
+        ));
+    }
     database::open(&ctx.db_path)
+}
+
+fn reset_roots(ctx: &AppContext) -> crate::storage::StorageRoots {
+    crate::storage::StorageRoots {
+        data: ctx.data_dir.clone(),
+        cache: ctx.cache_dir.clone(),
+        logs: ctx.logs_dir.clone(),
+        mods: ctx.default_mods_dir.clone(),
+        mode: ctx.storage_mode,
+    }
+}
+
+#[tauri::command]
+pub fn factory_reset_preview(
+    ctx: State<'_, AppContext>,
+) -> Result<crate::factory_reset::ResetPreview> {
+    crate::factory_reset::preview(&reset_roots(&ctx), &mods_dir(&ctx)?)
+}
+
+#[tauri::command]
+pub fn reset_application(
+    confirmation: String,
+    app: AppHandle,
+    ctx: State<'_, AppContext>,
+) -> Result<()> {
+    if confirmation != "RESET" {
+        return Err(AppError::Other(
+            "Type RESET to confirm clearing app data.".into(),
+        ));
+    }
+    crate::package_transaction::while_idle(|| {
+        deployment::ensure_game_stopped()?;
+        let library = ctx.mods_dir.try_write().map_err(|_| {
+            AppError::Other("Wait for the current library operation to finish.".into())
+        })?;
+        let preview_state = ctx
+            .previews
+            .try_lock()
+            .map_err(|_| AppError::Other("Wait for archive inspection to finish.".into()))?;
+        let installer_state = ctx
+            .installers
+            .try_lock()
+            .map_err(|_| AppError::Other("Wait for the installer to finish.".into()))?;
+        if !preview_state.is_empty() || !installer_state.is_empty() {
+            return Err(AppError::Other(
+                "Cancel the pending installation before resetting app data.".into(),
+            ));
+        }
+        let conn = connection(&ctx)?;
+        if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+            return Err(AppError::Other(
+                "Restore the temporary launch profile before resetting app data.".into(),
+            ));
+        }
+        for name in [
+            "package-operation",
+            "load-order-operation.json",
+            "adoption-operation.json",
+        ] {
+            if ctx.data_dir.join(name).exists() {
+                return Err(AppError::Other(
+                    "Restart the app to finish pending recovery before resetting it.".into(),
+                ));
+            }
+        }
+        let roots = reset_roots(&ctx);
+        if crate::factory_reset::is_pending(&roots)? {
+            return Err(AppError::Other(
+                "A reset is already pending. Close and reopen Zero Mod Manager.".into(),
+            ));
+        }
+        // A deliberately unusual game location must never become a reset target.
+        if let Some(path) = game(&ctx)?.path {
+            if let Ok(game) = Path::new(&path).canonicalize() {
+                for root in [&roots.data, &roots.cache, &roots.logs, &roots.mods] {
+                    if let Ok(root) = root.canonicalize() {
+                        if game.starts_with(&root) || root.starts_with(&game) {
+                            return Err(AppError::Other("App data overlaps the game folder. Move the app data before resetting.".into()));
+                        }
+                    }
+                }
+            }
+        }
+        drop(conn);
+        if ctx
+            .reset_pending
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Other("App reset is already scheduled.".into()));
+        }
+        if let Err(error) = crate::factory_reset::schedule(&roots, &library) {
+            ctx.reset_pending
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(error);
+        }
+        // No files are moved while this process has open handles. Startup owns
+        // the resumable reset, before normal recovery or migrations can write.
+        app.exit(0);
+        Ok(())
+    })
 }
 
 /// Reads a saved manual path without letting a moved Steam library make every
@@ -52,6 +173,9 @@ fn game(ctx: &AppContext) -> Result<GameInfo> {
 }
 fn require_game(ctx: &AppContext) -> Result<(GameInfo, PathBuf)> {
     let info = game(ctx)?;
+    if !info.detected {
+        return Err(AppError::GameNotFound);
+    }
     let path = info
         .path
         .as_ref()
@@ -59,10 +183,8 @@ fn require_game(ctx: &AppContext) -> Result<(GameInfo, PathBuf)> {
         .ok_or(AppError::GameNotFound)?;
     Ok((info, path))
 }
-fn tool(ctx: &AppContext) -> Result<crate::models::ToolInfo> {
-    let conn = connection(ctx)?;
-    let settings = database::settings(&conn)?;
-    Ok(retoc::find(settings.retoc_path.as_deref()))
+fn tool(_ctx: &AppContext) -> Result<crate::models::ToolInfo> {
+    Ok(crate::models::ToolInfo::default())
 }
 fn previews(
     ctx: &AppContext,
@@ -103,7 +225,6 @@ pub fn get_dashboard(ctx: State<'_, AppContext>) -> Result<Dashboard> {
     let game_path = game.path.as_deref().map(Path::new);
     let compat = game.compat_data_path.as_deref().map(Path::new);
     let ue4ss = ue4ss::detect(game_path, compat);
-    let retoc = tool(&ctx)?;
     let existing_mod_scan_pending =
         database::get_setting(&conn, "existing_mod_prompt_acknowledged")?.as_deref()
             != Some("true");
@@ -115,7 +236,7 @@ pub fn get_dashboard(ctx: State<'_, AppContext>) -> Result<Dashboard> {
         ue4ss,
         previous_build_id: ctx.previous_build_id.clone(),
         data_directory: ctx.data_dir.display().to_string(),
-        retoc,
+        storage_mode: ctx.storage_mode.into(),
         existing_mod_scan_pending,
     })
 }
@@ -128,9 +249,8 @@ pub fn list_mods(ctx: State<'_, AppContext>) -> Result<Vec<ModSummary>> {
 pub fn discover_existing_mods(ctx: State<'_, AppContext>) -> Result<ExistingModScan> {
     let (game_info, game_path) = require_game(&ctx)?;
     let conn = connection(&ctx)?;
-    let settings = database::settings(&conn)?;
-    let retoc = retoc::find(settings.retoc_path.as_deref());
-    let (scan, snapshot) = adoption::discover(&conn, &game_path, &retoc)?;
+    let scan_options = crate::models::ToolInfo::default();
+    let (scan, snapshot) = adoption::discover(&conn, &game_path, &scan_options)?;
     let mut held = discoveries(&ctx)?;
     // Discovery snapshots point into the live game folder and are useful only
     // to the currently visible review. Dropping older scans also bounds memory.
@@ -166,12 +286,22 @@ pub fn adopt_existing_mods(
     groups: Vec<AdoptionGroup>,
     ctx: State<'_, AppContext>,
 ) -> Result<AdoptionReport> {
-    let (game_info, _) = require_game(&ctx)?;
+    let (game_info, game_path) = require_game(&ctx)?;
     let snapshot = discoveries(&ctx)?.get(&scan_id).cloned().ok_or_else(|| {
         AppError::Other("That discovery expired. Scan the game folders again.".into())
     })?;
     let mut conn = connection(&ctx)?;
     let library = mods_dir(&ctx)?;
+    if game_path.canonicalize()? != snapshot.game.canonicalize()? {
+        return Err(AppError::Other(
+            "The game folder changed. Scan again before adopting mods.".into(),
+        ));
+    }
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before adopting mods.".into(),
+        ));
+    }
     let report = adoption::adopt(
         &mut conn,
         &library,
@@ -224,6 +354,37 @@ pub fn get_load_order_state(ctx: State<'_, AppContext>) -> Result<LoadOrderState
 }
 
 #[tauri::command]
+pub fn group_existing_mods(
+    ids: Vec<String>,
+    name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<()> {
+    package_operation(&ctx, || {
+        crate::library_groups::group(&mut connection(&ctx)?, &ids, &name)
+    })
+}
+
+#[tauri::command]
+pub fn restore_adopted_components(id: String, ctx: State<'_, AppContext>) -> Result<usize> {
+    package_operation(&ctx, || {
+        let (_, game) = require_game(&ctx)?;
+        crate::library_groups::restore_components(
+            &mut connection(&ctx)?,
+            &mods_dir(&ctx)?,
+            &game,
+            &id,
+        )
+    })
+}
+
+#[tauri::command]
+pub fn ungroup_existing_mods(id: String, ctx: State<'_, AppContext>) -> Result<usize> {
+    package_operation(&ctx, || {
+        crate::library_groups::ungroup(&mut connection(&ctx)?, &id)
+    })
+}
+
+#[tauri::command]
 pub fn preview_load_order(
     ordered_mod_ids: Vec<String>,
     ctx: State<'_, AppContext>,
@@ -239,6 +400,7 @@ pub fn apply_ue4ss_order(
     ordered_mod_ids: Vec<String>,
     ctx: State<'_, AppContext>,
 ) -> Result<LoadOrderState> {
+    deployment::ensure_game_stopped()?;
     let (_, game_path) = require_game(&ctx)?;
     let mut conn = connection(&ctx)?;
     let state = load_order::apply_ue4ss_order(&mut conn, &game_path, &ordered_mod_ids)?;
@@ -248,6 +410,14 @@ pub fn apply_ue4ss_order(
         "ue4ss_order_applied",
         &format!("ordered_mods={}", ordered_mod_ids.len()),
     );
+    profiles::capture_active(&conn)?;
+    let _ = operations::record(
+        &conn,
+        "load-order",
+        "completed",
+        "UE4SS start order applied",
+        serde_json::json!({"mods": ordered_mod_ids.len()}),
+    );
     Ok(state)
 }
 
@@ -256,6 +426,7 @@ pub fn apply_load_order(
     ordered_mod_ids: Vec<String>,
     ctx: State<'_, AppContext>,
 ) -> Result<LoadOrderState> {
+    deployment::ensure_game_stopped()?;
     let mut conn = connection(&ctx)?;
     let state = load_order::apply(
         &mut conn,
@@ -267,6 +438,14 @@ pub fn apply_load_order(
         "info",
         "load_order_applied",
         &format!("ordered_mods={}", ordered_mod_ids.len()),
+    );
+    profiles::capture_active(&conn)?;
+    let _ = operations::record(
+        &conn,
+        "load-order",
+        "completed",
+        "Packaged load order applied",
+        serde_json::json!({"mods": ordered_mod_ids.len()}),
     );
     Ok(state)
 }
@@ -294,13 +473,31 @@ pub fn inspect_mod(path: String, ctx: State<'_, AppContext>) -> Result<Inspectio
             &format!("source={path} error={error}"),
         );
     })?;
+    let assessment = mods::assess_package(&staging.executables);
+    if matches!(
+        assessment.role.as_str(),
+        "externalInstaller" | "externalTool"
+    ) {
+        let _ = std::fs::remove_dir_all(&staging.root);
+        log(
+            &ctx,
+            "info",
+            "external_package_blocked",
+            &format!("source={path} role={}", assessment.role),
+        );
+        return Ok(Inspection {
+            previews: Vec::new(),
+            installer: None,
+            package: assessment,
+        });
+    }
     // A download that scripts its own installation answers "what does this
     // contain?" with a set of questions instead of a payload. Reading it as a
     // plain archive would offer every variant at once, which is the pile the
     // script exists to sort out.
     if let Some(package_root) = fomod::locate(&staging.root) {
         match fomod::parse(&package_root) {
-            Ok(installer) => return begin_installer(&ctx, &source, installer, staging),
+            Ok(installer) => return begin_installer(&ctx, &source, installer, staging, assessment),
             // A script this manager cannot read is not a reason to refuse the
             // download: the archive still holds the files, and reading it the
             // ordinary way puts every option in front of the person by hand.
@@ -321,6 +518,7 @@ pub fn inspect_mod(path: String, ctx: State<'_, AppContext>) -> Result<Inspectio
         );
     })?;
     let previews = register_previews(&ctx, found)?;
+    let assessment = mods::resolved_assessment(&previews, assessment);
     log(
         &ctx,
         "info",
@@ -338,6 +536,7 @@ pub fn inspect_mod(path: String, ctx: State<'_, AppContext>) -> Result<Inspectio
     Ok(Inspection {
         previews,
         installer: None,
+        package: assessment,
     })
 }
 
@@ -354,7 +553,7 @@ fn scan_staged(
         game.path.as_deref().map(Path::new),
         game.compat_data_path.as_deref().map(Path::new),
     );
-    let tool = retoc::find(settings.retoc_path.as_deref());
+    let tool = crate::models::ToolInfo::default();
     mods::scan_staged(
         source,
         staging,
@@ -395,7 +594,11 @@ fn begin_installer(
     source: &Path,
     installer: fomod::Installer,
     staging: archives::Staging,
+    mut assessment: PackageAssessment,
 ) -> Result<Inspection> {
+    assessment.role = "modBundle".into();
+    assessment.title = "Scripted mod bundle".into();
+    assessment.reason = "The package uses a FOMOD selection script. Only files selected in the review flow are staged; no script is executed.".into();
     let session_id = uuid::Uuid::new_v4().to_string();
     let opened = installer.session(&session_id, &[]);
     let session = match opened {
@@ -416,6 +619,7 @@ fn begin_installer(
         return Ok(Inspection {
             previews,
             installer: None,
+            package: assessment,
         });
     }
     log(
@@ -428,6 +632,7 @@ fn begin_installer(
     Ok(Inspection {
         previews: Vec::new(),
         installer: Some(session),
+        package: assessment,
     })
 }
 
@@ -764,7 +969,7 @@ fn replaced_by(conn: &rusqlite::Connection, staged: &StagedMod) -> Result<Option
             })
             .transpose()?
             .map(|id| (id, "It ships the same container files.".to_string())),
-        "gamedir" => {
+        "gamedir" | "plugin" | "config" => {
             let game = match game_path(conn)? {
                 Some(path) => path,
                 None => return Ok(None),
@@ -775,7 +980,10 @@ fn replaced_by(conn: &rusqlite::Connection, staged: &StagedMod) -> Result<Option
                 .find_map(|file| {
                     database::destination_owner(
                         conn,
-                        &game.join(&file.destination_relative).display().to_string(),
+                        &deployment::destination_base(&game, &staged.mod_type)
+                            .join(&file.destination_relative)
+                            .display()
+                            .to_string(),
                         None,
                     )
                     .transpose()
@@ -885,113 +1093,305 @@ pub fn install_mod(
     force: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<ModSummary> {
-    let mut staged = previews(&ctx)?
-        .get(&staging_id)
-        .cloned()
-        .ok_or(AppError::PreviewExpired)?;
-    if let Some(name) = name
-        .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
-    {
-        staged.name = name.chars().take(120).collect();
-    }
-    if staged.mod_type == "ue4ss-runtime" {
-        return Err(AppError::Other(
-            "That archive is the UE4SS runtime. Install it with the UE4SS button instead.".into(),
-        ));
-    }
-    if staged.mod_type == "iostore" && staged.verification != "passed" {
-        return Err(AppError::RetocVerificationFailed(
-            staged
-                .verification_details
-                .clone()
-                .unwrap_or_else(|| "verification did not pass".into()),
-        ));
-    }
-    let (game_info, game_path) = require_game(&ctx)?;
-    let mut conn = connection(&ctx)?;
-    // Position the replacement where the mod it supersedes sat, rather than at
-    // the top, so an upgrade does not silently change which mod wins.
-    let previous_order = replace
-        .as_ref()
-        .map(|_| ordered_supported(&conn))
-        .transpose()?;
-    let library = mods_dir(&ctx)?;
-    let result = match replace.as_deref() {
-        Some(old_id) => deployment::replace(
-            &mut conn,
-            &library,
-            &game_path,
-            old_id,
-            &staged,
-            game_info.steam_build_id,
-            force,
-        ),
-        None => deployment::install(
-            &mut conn,
-            &library,
-            &game_path,
-            &staged,
-            game_info.steam_build_id,
-        ),
-    };
-    let summary = result?;
-    if summary.mod_type == "ue4ss" {
-        // The recorded start order is the source of truth, so mods.txt is
-        // rewritten from it. For a fresh install that only confirms the entry
-        // just appended; for an upgrade it restores the slot it inherited.
-        let ordered = load_order::state(&conn)?
-            .ue4ss_entries
-            .into_iter()
-            .map(|entry| entry.id)
-            .collect::<Vec<_>>();
-        if let Err(error) = load_order::apply_ue4ss_order(&mut conn, &game_path, &ordered) {
-            log(&ctx, "warn", "ue4ss_order_not_written", &error.to_string());
+    package_operation(&ctx, || {
+        let mut staged = previews(&ctx)?
+            .get(&staging_id)
+            .cloned()
+            .ok_or(AppError::PreviewExpired)?;
+        if let Some(name) = name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            staged.name = name.chars().take(120).collect();
         }
-    }
-    if matches!(summary.mod_type.as_str(), "pak" | "iostore") {
-        let ordered = match (previous_order, replace.as_deref()) {
-            (Some(previous), Some(old_id)) => keep_position(&conn, &previous, old_id, &summary.id)?,
-            _ => ordered_supported(&conn)?,
+        if staged.mod_type == "ue4ss-runtime" {
+            return Err(AppError::Other(
+                "That archive is the UE4SS runtime. Install it with the UE4SS button instead."
+                    .into(),
+            ));
+        }
+        let (game_info, game_path) = require_game(&ctx)?;
+        let mut conn = connection(&ctx)?;
+        // Position the replacement where the mod it supersedes sat, rather than at
+        // the top, so an upgrade does not silently change which mod wins.
+        let previous_order = replace
+            .as_ref()
+            .map(|_| ordered_supported(&conn))
+            .transpose()?;
+        let library = mods_dir(&ctx)?;
+        let result = match replace.as_deref() {
+            Some(old_id) => deployment::replace(
+                &mut conn,
+                &library,
+                &game_path,
+                old_id,
+                &staged,
+                game_info.steam_build_id,
+                force,
+            ),
+            None => deployment::install(
+                &mut conn,
+                &library,
+                &game_path,
+                &staged,
+                game_info.steam_build_id,
+            ),
         };
-        if let Err(error) = load_order::apply(
-            &mut conn,
-            &ordered,
-            &ctx.data_dir.join("load-order-operation.json"),
-        ) {
-            let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
-            return Err(error);
+        let summary = result?;
+        if let Some(manifest) = &staged.manifest {
+            if let Err(error) = compatibility::install_author_manifest(&conn, &summary.id, manifest)
+            {
+                let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
+                return Err(error);
+            }
+            if let Some(nexus) = &manifest.nexus {
+                if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
+                    database::set_nexus_ids(&conn, &summary.id, mod_id, file_id)?;
+                }
+            }
         }
-    }
-    // Keep a failed preview available for retry. Only a fully successful
-    // deployment consumes its staging id and may release the shared bundle
-    // sandbox.
-    previews(&ctx)?.remove(&staging_id);
-    release_staging(&ctx, &staged.staging_root);
-    if let Some(root) = &staged.fomod_source_root {
-        release_staging(&ctx, root);
-    }
-    // A payload that arrived through the nxm:// handoff carries the mod and
-    // file it came from. Recording it here is what later lets the manager ask
-    // Nexus whether a newer file exists; a hand-picked archive records nothing
-    // and is simply never checked.
-    match database::link_nexus_source(&conn, &summary.id, &staged.source_archive) {
-        Ok(true) => log(
+        if summary.mod_type == "ue4ss" {
+            // The recorded start order is the source of truth, so mods.txt is
+            // rewritten from it. For a fresh install that only confirms the entry
+            // just appended; for an upgrade it restores the slot it inherited.
+            let ordered = load_order::state(&conn)?
+                .ue4ss_entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            if let Err(error) = load_order::apply_ue4ss_order(&mut conn, &game_path, &ordered) {
+                log(&ctx, "warn", "ue4ss_order_not_written", &error.to_string());
+            }
+        }
+        if matches!(summary.mod_type.as_str(), "pak" | "iostore") {
+            let ordered = match (previous_order, replace.as_deref()) {
+                (Some(previous), Some(old_id)) => {
+                    keep_position(&conn, &previous, old_id, &summary.id)?
+                }
+                _ => ordered_supported(&conn)?,
+            };
+            if let Err(error) = load_order::apply(
+                &mut conn,
+                &ordered,
+                &ctx.data_dir.join("load-order-operation.json"),
+            ) {
+                let _ = deployment::uninstall(&conn, &library, &summary.id, true, Some(&game_path));
+                return Err(error);
+            }
+        }
+        profiles::capture_active(&conn)?;
+        // Keep a failed preview available for retry. Only a fully successful
+        // deployment consumes its staging id and may release the shared bundle
+        // sandbox.
+        previews(&ctx)?.remove(&staging_id);
+        release_staging(&ctx, &staged.staging_root);
+        if let Some(root) = &staged.fomod_source_root {
+            release_staging(&ctx, root);
+        }
+        log(
             &ctx,
             "info",
-            "nexus_source_linked",
-            &format!("mod_id={}", summary.id),
-        ),
-        Ok(false) => {}
-        Err(error) => log(&ctx, "warn", "nexus_source_not_linked", &error.to_string()),
+            "mod_installed",
+            &format!("mod_id={} type={}", summary.id, summary.mod_type),
+        );
+        let _ = operations::record(
+            &conn,
+            "install",
+            "completed",
+            &format!("Installed {}", summary.name),
+            serde_json::json!({"modId": &summary.id, "type": &summary.mod_type}),
+        );
+        Ok(summary)
+    })
+}
+
+/// Deploys a complete inspected package, with explicit whole-package replacement
+/// consent and durable file/database rollback covering metadata and load order.
+fn validate_bundle_origin(staged: &[StagedMod]) -> Result<()> {
+    let first = staged
+        .first()
+        .ok_or_else(|| AppError::Other("The bundle has no components.".into()))?;
+    if staged.iter().any(|item| {
+        item.source_archive != first.source_archive || item.staging_root != first.staging_root
+    }) {
+        return Err(AppError::Other("A bundle must come from one reviewed inspection. An archive name or shared folder does not prove that entries belong together.".into()));
     }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn install_bundle(
+    items: Vec<BundleInstallItem>,
+    replace_bundle_id: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<BundleInstallReport> {
+    if !(1..=64).contains(&items.len()) {
+        return Err(AppError::Other(
+            "A bundle install needs between 1 and 64 components.".into(),
+        ));
+    }
+    let mut unique = std::collections::HashSet::new();
+    if items
+        .iter()
+        .any(|item| !unique.insert(item.staging_id.as_str()))
+    {
+        return Err(AppError::Other(
+            "A bundle cannot contain the same staged component twice.".into(),
+        ));
+    }
+    let staged = {
+        let held = previews(&ctx)?;
+        items
+            .iter()
+            .map(|item| {
+                let mut component = held
+                    .get(&item.staging_id)
+                    .cloned()
+                    .ok_or(AppError::PreviewExpired)?;
+                if let Some(name) = item
+                    .name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    component.name = name.chars().take(120).collect();
+                }
+                Ok(component)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    validate_bundle_origin(&staged)?;
+    for component in &staged {
+        if component.mod_type == "ue4ss-runtime" {
+            return Err(AppError::Other(
+                "A UE4SS runtime cannot be installed as a mod bundle component.".into(),
+            ));
+        }
+    }
+
+    let (game_info, game_path) = require_game(&ctx)?;
+    deployment::ensure_game_stopped()?;
+    let mut conn = connection(&ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before updating mods.".into(),
+        ));
+    }
+    let all = database::list_mods(&conn)?;
+    let matched = staged
+        .iter()
+        .map(|item| replaced_by(&conn, item).map(|r| r.map(|r| r.mod_id)))
+        .collect::<Result<Vec<_>>>()?;
+    let old = match &replace_bundle_id {
+        Some(bundle) => {
+            let members = all
+                .iter()
+                .filter(|item| item.bundle_id.as_ref() == Some(bundle))
+                .cloned()
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                return Err(AppError::Other(
+                    "The selected package no longer exists. Inspect the archive again.".into(),
+                ));
+            }
+            if matched
+                .iter()
+                .flatten()
+                .any(|id| !members.iter().any(|m| &m.id == id))
+            {
+                return Err(AppError::Other(
+                    "This archive also replaces another mod. No files were changed.".into(),
+                ));
+            }
+            members
+        }
+        None if matched.iter().any(Option::is_some) => {
+            return Err(AppError::Other(
+                "Confirm the complete package update before installing.".into(),
+            ))
+        }
+        None => Vec::new(),
+    };
+    let bundle_id = replace_bundle_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let library = mods_dir(&ctx)?;
+    let installed =
+        crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |conn| {
+            let installed = crate::packages::deploy(
+                conn,
+                &library,
+                &game_path,
+                &staged,
+                &old,
+                &matched,
+                game_info.steam_build_id.clone(),
+                &bundle_id,
+            )?;
+            for (component, summary) in staged.iter().zip(&installed) {
+                if let Some(manifest) = &component.manifest {
+                    compatibility::install_author_manifest(conn, &summary.id, manifest)?;
+                    if let Some(nexus) = &manifest.nexus {
+                        if let (Some(mod_id), Some(file_id)) = (nexus.mod_id, nexus.file_id) {
+                            database::set_nexus_ids(conn, &summary.id, mod_id, file_id)?;
+                        }
+                    }
+                }
+            }
+            let ue4ss_order = load_order::state(conn)?
+                .ue4ss_entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            load_order::apply_ue4ss_order(conn, &game_path, &ue4ss_order)?;
+            let packaged_order = ordered_supported(conn)?;
+            load_order::apply(
+                conn,
+                &packaged_order,
+                &ctx.data_dir.join("load-order-operation.json"),
+            )?;
+            profiles::capture_active(conn)?;
+            Ok(installed)
+        })?;
+
+    // Staging is consumed only after deployment, metadata, ordering and active
+    // profile capture all succeed.
+    let ids = items
+        .iter()
+        .map(|item| item.staging_id.clone())
+        .collect::<Vec<_>>();
+    let mut roots = Vec::new();
+    {
+        let mut held = previews(&ctx)?;
+        for id in &ids {
+            if let Some(component) = held.remove(id) {
+                roots.push(component.staging_root);
+                if let Some(root) = component.fomod_source_root {
+                    roots.push(root);
+                }
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        release_staging(&ctx, &root);
+    }
+    let _ = operations::record(
+        &conn,
+        "bundle-install",
+        "completed",
+        &format!("Installed {} bundle components", installed.len()),
+        serde_json::json!({"bundleId": &bundle_id, "modIds": installed.iter().map(|item| &item.id).collect::<Vec<_>>()}),
+    );
     log(
         &ctx,
         "info",
-        "mod_installed",
-        &format!("mod_id={} type={}", summary.id, summary.mod_type),
+        "bundle_installed",
+        &format!("bundle_id={bundle_id} components={}", installed.len()),
     );
-    Ok(summary)
+    Ok(BundleInstallReport {
+        bundle_id,
+        components: installed,
+    })
 }
 
 #[tauri::command]
@@ -1001,21 +1401,35 @@ pub fn set_mod_enabled(
     force: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<()> {
-    let (_, game_path) = require_game(&ctx)?;
-    let conn = connection(&ctx)?;
-    let library = mods_dir(&ctx)?;
-    deployment::set_enabled(&conn, &library, &game_path, &id, enabled, force)?;
-    log(
-        &ctx,
-        "info",
-        if enabled {
-            "mod_enabled"
-        } else {
-            "mod_disabled"
-        },
-        &format!("mod_id={id}"),
-    );
-    Ok(())
+    package_operation(&ctx, || {
+        let (_, game_path) = require_game(&ctx)?;
+        let conn = connection(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        deployment::set_enabled(&conn, &library, &game_path, &id, enabled, force)?;
+        profiles::capture_active(&conn)?;
+        let _ = operations::record(
+            &conn,
+            if enabled { "enable" } else { "disable" },
+            "completed",
+            if enabled {
+                "Mod enabled"
+            } else {
+                "Mod disabled"
+            },
+            serde_json::json!({"modId": &id}),
+        );
+        log(
+            &ctx,
+            "info",
+            if enabled {
+                "mod_enabled"
+            } else {
+                "mod_disabled"
+            },
+            &format!("mod_id={id}"),
+        );
+        Ok(())
+    })
 }
 
 /// Keeps a mod out of the library list without touching what is deployed.
@@ -1034,13 +1448,69 @@ pub fn set_mod_hidden(id: String, hidden: bool, ctx: State<'_, AppContext>) -> R
 }
 
 #[tauri::command]
-pub fn uninstall_mod(id: String, force: bool, ctx: State<'_, AppContext>) -> Result<()> {
-    let game_path = game(&ctx)?.path.map(PathBuf::from);
-    let conn = connection(&ctx)?;
+pub fn uninstall_bundle(id: String, ctx: State<'_, AppContext>) -> Result<()> {
+    let game_path = game(&ctx)?.path.map(PathBuf::from).ok_or_else(|| {
+        AppError::Other("Connect the game folder before removing a package.".into())
+    })?;
     let library = mods_dir(&ctx)?;
-    deployment::uninstall(&conn, &library, &id, force, game_path.as_deref())?;
-    log(&ctx, "info", "mod_uninstalled", &format!("mod_id={id}"));
-    Ok(())
+    let mut conn = connection(&ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other(
+            "Restore the temporary launch profile before removing mods.".into(),
+        ));
+    }
+    let mods = database::list_mods(&conn)?;
+    let anchor = mods
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or_else(|| AppError::Other("This mod is no longer installed.".into()))?;
+    let ids = mods
+        .iter()
+        .filter(|item| {
+            item.id == id || (anchor.bundle_id.is_some() && item.bundle_id == anchor.bundle_id)
+        })
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    deployment::validate_removal(&conn, &ids)?;
+    crate::package_transaction::run(&mut conn, &ctx.data_dir, &library, &game_path, |conn| {
+        for member in &ids {
+            deployment::uninstall(conn, &library, member, false, Some(&game_path))?;
+        }
+        profiles::capture_active(conn)?;
+        operations::record(
+            conn,
+            "bundle-uninstall",
+            "completed",
+            "Package removed",
+            serde_json::json!({"modIds":ids}),
+        )?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub fn uninstall_mod(id: String, force: bool, ctx: State<'_, AppContext>) -> Result<()> {
+    package_operation(&ctx, || {
+        if database::get_setting(&connection(&ctx)?, "pending_restore_profile")?.is_some() {
+            return Err(AppError::Other(
+                "Restore the temporary launch profile before removing mods.".into(),
+            ));
+        }
+        let game_path = game(&ctx)?.path.map(PathBuf::from);
+        let conn = connection(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        deployment::uninstall(&conn, &library, &id, force, game_path.as_deref())?;
+        profiles::capture_active(&conn)?;
+        let _ = operations::record(
+            &conn,
+            "uninstall",
+            "completed",
+            "Mod uninstalled",
+            serde_json::json!({"modId": &id}),
+        );
+        log(&ctx, "info", "mod_uninstalled", &format!("mod_id={id}"));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -1056,6 +1526,7 @@ pub fn install_ue4ss(
     path: String,
     ctx: State<'_, AppContext>,
 ) -> Result<crate::models::Ue4ssInstallReport> {
+    deployment::ensure_game_stopped()?;
     let (_, game_path) = require_game(&ctx)?;
     let report = ue4ss::install_from(Path::new(&path), &game_path, &ctx.cache_dir)?;
     log(
@@ -1067,6 +1538,14 @@ pub fn install_ue4ss(
             report.installed,
             report.preserved.len()
         ),
+    );
+    let conn = connection(&ctx)?;
+    let _ = operations::record(
+        &conn,
+        "runtime",
+        "completed",
+        "UE4SS runtime installed",
+        serde_json::json!({"files": report.installed, "preserved": report.preserved.len()}),
     );
     Ok(report)
 }
@@ -1106,30 +1585,39 @@ pub struct UpdateInfo {
     pub latest_version: String,
     pub release_url: String,
     pub update_available: bool,
-}
-
-fn version_parts(version: &str) -> Option<Vec<u64>> {
-    version
-        .trim_start_matches(['v', 'V'])
-        .split('.')
-        .map(|part| {
-            part.split_once('-')
-                .map_or(part, |(number, _)| number)
-                .parse()
-                .ok()
-        })
-        .collect()
+    pub release_available: bool,
 }
 
 fn version_is_newer(latest: &str, current: &str) -> bool {
-    let (Some(mut latest), Some(mut current)) = (version_parts(latest), version_parts(current))
-    else {
-        return latest.trim_start_matches(['v', 'V']) != current.trim_start_matches(['v', 'V']);
-    };
-    let width = latest.len().max(current.len());
-    latest.resize(width, 0);
-    current.resize(width, 0);
-    latest > current
+    match (
+        semver::Version::parse(latest.trim_start_matches(['v', 'V'])),
+        semver::Version::parse(current.trim_start_matches(['v', 'V'])),
+    ) {
+        (Ok(latest), Ok(current)) => latest > current,
+        _ => false,
+    }
+}
+fn select_release(value: &serde_json::Value, allow_prerelease: bool) -> Option<&serde_json::Value> {
+    let items = value
+        .as_array()
+        .map(|items| items.iter().collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![value]);
+    items
+        .into_iter()
+        .filter(|item| item["draft"].as_bool() != Some(true))
+        .filter_map(|item| {
+            let version =
+                semver::Version::parse(item["tag_name"].as_str()?.trim_start_matches(['v', 'V']))
+                    .ok()?;
+            if !allow_prerelease
+                && (!version.pre.is_empty() || item["prerelease"].as_bool() == Some(true))
+            {
+                return None;
+            }
+            Some((version, item))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, item)| item)
 }
 
 /// Queries the latest published GitHub release. The interface calls this once
@@ -1142,21 +1630,48 @@ pub async fn check_for_updates() -> Result<UpdateInfo> {
         )
     })?;
     let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let allow_prerelease = !semver::Version::parse(&current_version)
+        .map_err(|e| AppError::Other(e.to_string()))?
+        .pre
+        .is_empty();
+    let endpoint = if allow_prerelease {
+        format!("{}?per_page=30", release_api.trim_end_matches("/latest"))
+    } else {
+        release_api.to_string()
+    };
+    let unavailable = || UpdateInfo {
+        current_version: current_version.clone(),
+        latest_version: current_version.clone(),
+        release_url: format!(
+            "{}/releases",
+            option_env!("ZERO_MOD_MANAGER_PROJECT_URL").unwrap_or("")
+        ),
+        update_available: false,
+        release_available: false,
+    };
     let response = reqwest::Client::builder()
         .user_agent(format!("zero-mod-manager/{current_version}"))
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|error| AppError::Network(error.to_string()))?
-        .get(release_api)
+        .get(endpoint)
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
-        .and_then(reqwest::Response::error_for_status)
         .map_err(|error| AppError::Network(error.to_string()))?;
-    let release: serde_json::Value = response
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(unavailable());
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|error| AppError::Network(error.to_string()))?;
+    let payload: serde_json::Value = response
         .json()
         .await
         .map_err(|error| AppError::Network(error.to_string()))?;
+    let Some(release) = select_release(&payload, allow_prerelease) else {
+        return Ok(unavailable());
+    };
     let tag = release["tag_name"]
         .as_str()
         .ok_or_else(|| AppError::Other("GitHub returned a release without a version.".into()))?;
@@ -1166,6 +1681,7 @@ pub async fn check_for_updates() -> Result<UpdateInfo> {
     let latest_version = tag.trim_start_matches(['v', 'V']).to_string();
     Ok(UpdateInfo {
         update_available: version_is_newer(&latest_version, &current_version),
+        release_available: true,
         current_version,
         latest_version,
         release_url: release_url.to_string(),
@@ -1195,10 +1711,9 @@ pub fn legacy_import_status(
 
 #[tauri::command]
 pub fn import_legacy_data(
-    include_nexus_key: bool,
     ctx: State<'_, AppContext>,
 ) -> Result<crate::migration::LegacyImportReport> {
-    let report = crate::migration::import(&ctx, include_nexus_key)?;
+    let report = crate::migration::import(&ctx, false)?;
     log(
         &ctx,
         "info",
@@ -1211,6 +1726,15 @@ pub fn import_legacy_data(
             report.nexus_key_imported
         ),
     );
+    let conn = connection(&ctx)?;
+    profiles::capture_active(&conn)?;
+    let _ = operations::record(
+        &conn,
+        "migration",
+        "completed",
+        "Legacy ZCOM data imported",
+        serde_json::json!({"mods": report.imported_mods, "files": report.copied_files}),
+    );
     Ok(report)
 }
 #[tauri::command]
@@ -1221,9 +1745,6 @@ pub fn get_settings(ctx: State<'_, AppContext>) -> Result<AppSettings> {
 pub fn save_settings(mut settings: AppSettings, ctx: State<'_, AppContext>) -> Result<()> {
     if settings.game_path.as_deref() == Some("") {
         settings.game_path = None
-    }
-    if settings.retoc_path.as_deref() == Some("") {
-        settings.retoc_path = None
     }
     if settings
         .seven_zip_path
@@ -1532,48 +2053,72 @@ fn configured_executable(settings: &AppSettings) -> Result<Option<(PathBuf, Path
     Ok(Some((executable, working_directory)))
 }
 
-#[tauri::command]
-pub fn launch_game(app: AppHandle, ctx: State<'_, AppContext>) -> Result<LaunchReport> {
-    let settings = database::settings(&connection(&ctx)?)?;
+fn validate_launch_file(executable: &Path) -> Result<()> {
+    if !executable.is_file() || std::fs::metadata(executable)?.len() == 0 {
+        return Err(AppError::Other("The game executable is missing or empty. Choose a valid game installation in Settings before launching.".into()));
+    }
+    Ok(())
+}
+
+fn perform_launch(app: &AppHandle, ctx: &AppContext) -> Result<String> {
+    let settings = database::settings(&connection(ctx)?)?;
     if let Some((executable, working_directory)) = configured_executable(&settings)? {
-        std::process::Command::new(&executable)
-            .current_dir(&working_directory)
-            .spawn()
-            .map_err(|error| {
-                AppError::Other(format!(
-                    "The custom game executable could not be launched: {error}. Choose a compatible executable or launcher in Settings."
-                ))
-            })?;
+        validate_launch_file(&executable)?;
+        crate::launcher::launch(&executable, &working_directory)
+            .map_err(|error| AppError::Other(crate::launcher::error_message(&error)))?;
         log(
-            &ctx,
+            ctx,
             "info",
             "game_launch_requested",
             &format!("source=custom_executable path={}", executable.display()),
         );
-        return Ok(LaunchReport {
-            method: "custom-executable".into(),
-        });
+        return Ok("custom-executable".into());
     }
-    require_game(&ctx)?;
+    let (game_info, game_path) = require_game(ctx)?;
+    validate_launch_file(&game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe"))?;
+    if game_info.source == "ea" {
+        let executable = game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe");
+        let working_directory = executable.parent().unwrap_or(&game_path);
+        std::process::Command::new(&executable)
+            .current_dir(working_directory)
+            .spawn()
+            .map_err(|error| {
+                AppError::Other(format!(
+                    "EA App could not launch the game executable: {error}"
+                ))
+            })?;
+        log(
+            ctx,
+            "info",
+            "game_launch_requested",
+            "source=ea_installation",
+        );
+        return Ok("ea".into());
+    }
     #[cfg(target_os = "linux")]
     if steam::running_from_appimage() {
         steam::launch_from_appimage()?;
         log(
-            &ctx,
+            ctx,
             "info",
             "game_launch_requested",
             "source=steam_uri appimage_environment=sanitized",
         );
-        return Ok(LaunchReport {
-            method: "steam".into(),
-        });
+        return Ok("steam".into());
     }
     app.opener()
         .open_url(steam::launch_url(), None::<String>)
         .map_err(|error| AppError::Other(format!("Steam could not launch the game: {error}")))?;
-    log(&ctx, "info", "game_launch_requested", "source=steam_uri");
+    log(ctx, "info", "game_launch_requested", "source=steam_uri");
+    Ok("steam".into())
+}
+
+#[tauri::command]
+pub fn launch_game(app: AppHandle, ctx: State<'_, AppContext>) -> Result<LaunchReport> {
     Ok(LaunchReport {
-        method: "steam".into(),
+        method: perform_launch(&app, &ctx)?,
+        session_id: None,
+        mode: "modded".into(),
     })
 }
 
@@ -1628,679 +2173,801 @@ pub fn report_interface_layout(context: String, ctx: State<'_, AppContext>) {
     log(&ctx, "warn", "interface_layout_repaired", &detail);
 }
 
-/// What Settings needs to describe the Nexus connection without revealing the
-/// key itself.
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NexusStatus {
-    pub has_key: bool,
-    pub storage: Option<crate::credentials::Storage>,
-    /// Who the stored key belongs to, remembered from the moment it was
-    /// verified so Settings can say so again after a restart without asking
-    /// Nexus on every launch.
-    pub account_name: Option<String>,
-    /// A premium account can resolve a download link without the key the
-    /// website mints, which is the only reason a direct update download is
-    /// offered at all.
-    pub premium: bool,
-    pub handler_registered: bool,
-    /// The application currently handling `nxm://`, when it is not this one.
-    /// Claiming the protocol is a real conflict with whatever held it, so the
-    /// interface names the other application rather than failing quietly.
-    pub handler_owner: Option<String>,
-    /// Why registration cannot take effect on this system, if it cannot.
-    pub handler_problem: Option<String>,
-}
-
+/// The release smoke test waits for this event. Backend startup alone cannot
+/// prove that the production WebView loaded the embedded frontend rather than
+/// a dead development URL.
 #[tauri::command]
-pub fn nexus_status(app: tauri::AppHandle, ctx: State<'_, AppContext>) -> Result<NexusStatus> {
-    let conn = connection(&ctx)?;
-    Ok(nexus_status_for(&app, &conn))
-}
-
-/// Checks the key against Nexus before storing it, so a typo is reported at
-/// the moment it is entered rather than during a download.
-#[tauri::command]
-pub async fn set_nexus_key(key: String, app: tauri::AppHandle) -> Result<crate::nexus::Account> {
-    let account = crate::nexus::validate(key.trim()).await?;
-    let ctx = app.state::<AppContext>();
-    let conn = database::open(&ctx.db_path)?;
-    let storage = crate::credentials::store(&conn, &key)?;
-    database::set_setting(&conn, "nexus_account_name", &account.name)?;
-    database::set_setting(&conn, "nexus_premium", &account.premium.to_string())?;
-    drop(conn);
+pub fn frontend_ready(ctx: State<'_, AppContext>) {
     log(
         &ctx,
         "info",
-        "nexus_key_stored",
-        &format!("storage={storage:?} premium={}", account.premium),
+        "frontend_ready",
+        &format!("storage_mode={}", ctx.storage_mode),
     );
-    Ok(account)
+}
+
+// Operational Readiness API -------------------------------------------------
+
+#[tauri::command]
+pub fn list_profiles(ctx: State<'_, AppContext>) -> Result<Vec<ProfileSummary>> {
+    profiles::list(&connection(&ctx)?)
 }
 
 #[tauri::command]
-pub fn clear_nexus_key(ctx: State<'_, AppContext>) -> Result<()> {
+pub fn get_profile(profile_id: String, ctx: State<'_, AppContext>) -> Result<ProfileDetail> {
+    profiles::detail(&connection(&ctx)?, &profile_id)
+}
+
+#[tauri::command]
+pub fn active_profile(ctx: State<'_, AppContext>) -> Result<Option<ProfileDetail>> {
+    profiles::active(&connection(&ctx)?)
+}
+
+#[tauri::command]
+pub fn create_profile(
+    name: String,
+    notes: String,
+    ctx: State<'_, AppContext>,
+) -> Result<ProfileDetail> {
     let conn = connection(&ctx)?;
-    crate::credentials::clear(&conn)?;
-    for key in ["nexus_account_name", "nexus_premium"] {
-        database::delete_setting(&conn, key)?;
-    }
-    log(&ctx, "info", "nexus_key_cleared", "");
-    Ok(())
-}
-
-fn nxm_handler_registered(app: &tauri::AppHandle) -> bool {
-    use tauri_plugin_deep_link::DeepLinkExt;
-    app.deep_link().is_registered("nxm").unwrap_or(false)
-}
-
-/// Reads the desktop entry that currently owns `nxm://` and resolves it to a
-/// human name, so the interface can say who holds the protocol.
-#[cfg(target_os = "linux")]
-fn nxm_handler_owner() -> Option<String> {
-    let output = std::process::Command::new("xdg-mime")
-        .args(["query", "default", "x-scheme-handler/nxm"])
-        .output()
-        .ok()?;
-    let entry = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if entry.is_empty() {
-        return None;
-    }
-    let mut roots = vec![dirs::data_dir()?];
-    roots.extend(
-        std::env::var("XDG_DATA_DIRS")
-            .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
-            .split(':')
-            .map(PathBuf::from),
+    let profile = profiles::create(&conn, &name, &notes)?;
+    let _ = operations::record(
+        &conn,
+        "profile",
+        "completed",
+        &format!("Created profile {}", profile.summary.name),
+        serde_json::json!({"profileId": &profile.summary.id}),
     );
-    for root in roots {
-        let candidate = root.join("applications").join(&entry);
-        let Ok(text) = std::fs::read_to_string(&candidate) else {
-            continue;
-        };
-        if let Some(name) = text
-            .lines()
-            .find_map(|line| line.strip_prefix("Name="))
-            .filter(|name| !name.is_empty())
-        {
-            return Some(name.to_string());
-        }
-    }
-    Some(entry)
+    Ok(profile)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn nxm_handler_owner() -> Option<String> {
-    None
-}
-
-/// `xdg-mime` resolves a desktop entry by taking the first whitespace-separated
-/// word of `Exec`, so a correctly quoted path containing a space never resolves
-/// and the entry is skipped without any error. Detect that here rather than
-/// letting the toggle appear to do nothing.
-#[cfg(target_os = "linux")]
-fn nxm_handler_problem() -> Option<String> {
-    let missing: Vec<&str> = ["xdg-mime", "update-desktop-database"]
-        .into_iter()
-        .filter(|tool| {
-            std::env::var_os("PATH").is_none_or(|path| {
-                !std::env::split_paths(&path).any(|dir| dir.join(tool).is_file())
-            })
-        })
-        .collect();
-    (!missing.is_empty()).then(|| {
-        format!(
-            "{} is not installed, so nxm:// links cannot be registered. Install xdg-utils and \
-             desktop-file-utils.",
-            missing.join(" and ")
-        )
-    })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn nxm_handler_problem() -> Option<String> {
-    None
-}
-
-fn nexus_status_for(app: &tauri::AppHandle, conn: &rusqlite::Connection) -> NexusStatus {
-    let storage = crate::credentials::location(conn);
-    let registered = nxm_handler_registered(app);
-    NexusStatus {
-        has_key: storage.is_some(),
-        account_name: storage
-            .is_some()
-            .then(|| {
-                database::get_setting(conn, "nexus_account_name")
-                    .ok()
-                    .flatten()
-            })
-            .flatten(),
-        premium: storage.is_some()
-            && database::get_setting(conn, "nexus_premium").ok().flatten() == Some("true".into()),
-        storage,
-        handler_registered: registered,
-        handler_owner: (!registered).then(nxm_handler_owner).flatten(),
-        handler_problem: (!registered).then(nxm_handler_problem).flatten(),
-    }
-}
-
-/// Claims or releases the `nxm://` association. Never called on start-up: the
-/// user opts in from Settings so the manager does not quietly take the
-/// protocol away from another mod manager.
 #[tauri::command]
-pub fn set_nxm_handler(
+pub fn update_profile(
+    profile_id: String,
+    name: String,
+    notes: String,
+    required_runtime: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<ProfileDetail> {
+    profiles::update(
+        &connection(&ctx)?,
+        &profile_id,
+        &name,
+        &notes,
+        required_runtime.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn delete_profile(profile_id: String, ctx: State<'_, AppContext>) -> Result<()> {
+    profiles::remove(&connection(&ctx)?, &profile_id)
+}
+
+#[tauri::command]
+pub fn set_profile_mod_state(
+    profile_id: String,
+    mod_id: String,
     enabled: bool,
-    app: tauri::AppHandle,
+    priority: Option<i64>,
     ctx: State<'_, AppContext>,
-) -> Result<NexusStatus> {
-    use tauri_plugin_deep_link::DeepLinkExt;
-    if enabled {
-        // The plugin quotes Exec, which xdg-mime can never resolve, so the
-        // Linux entry is written by crate::protocol instead. Windows registers
-        // through the registry and is unaffected.
-        #[cfg(target_os = "linux")]
-        crate::protocol::register(
-            app.config()
-                .product_name
-                .as_deref()
-                .unwrap_or("Zero Mod Manager"),
-            &ctx.data_dir,
+) -> Result<ProfileDetail> {
+    profiles::set_mod_state(&connection(&ctx)?, &profile_id, &mod_id, enabled, priority)
+}
+
+#[tauri::command]
+pub fn preview_profile_switch(
+    profile_id: String,
+    ctx: State<'_, AppContext>,
+) -> Result<ProfileSwitchPreview> {
+    profiles::preview(&connection(&ctx)?, &profile_id)
+}
+
+#[tauri::command]
+pub fn activate_profile(profile_id: String, ctx: State<'_, AppContext>) -> Result<ProfileDetail> {
+    package_operation(&ctx, || {
+        let (game_info, game_path) = require_game(&ctx)?;
+        let mut conn = connection(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        let result = profiles::activate(
+            &mut conn,
+            &library,
+            &game_path,
+            &ctx.data_dir.join("load-order-operation.json"),
+            &profile_id,
+            game_info.steam_build_id,
         )?;
-        #[cfg(not(target_os = "linux"))]
-        app.deep_link().register("nxm").map_err(|e| {
-            AppError::Other(format!("The nxm:// association could not change: {e}"))
-        })?;
-    } else {
-        app.deep_link().unregister("nxm").map_err(|e| {
-            AppError::Other(format!("The nxm:// association could not change: {e}"))
-        })?;
-        // The plugin only clears the generic list.
-        #[cfg(target_os = "linux")]
-        crate::protocol::unregister()?;
-    }
-    let conn = connection(&ctx)?;
-    Ok(nexus_status_for(&app, &conn))
-}
-
-/// Collects a link that launched the application, exactly once.
-#[tauri::command]
-pub fn take_pending_nxm(ctx: State<'_, AppContext>) -> Result<Option<String>> {
-    let mut pending = ctx
-        .pending_nxm
-        .lock()
-        .map_err(|_| AppError::Other("pending link state lock was poisoned".into()))?;
-    Ok(pending.take())
-}
-
-/// Resolves an `nxm://` link and downloads the file into the cache, returning
-/// the local path. Inspection and installation then run through exactly the
-/// same validation as a file the user picked by hand.
-#[tauri::command]
-pub async fn nexus_download(url: String, app: tauri::AppHandle) -> Result<String> {
-    use tauri::Emitter;
-    let link = crate::nexus::parse_nxm(&url)?;
-    let (api_key, cache_dir) = {
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        let key = crate::credentials::load(&conn).ok_or(AppError::NexusKeyMissing)?;
-        (key, ctx.cache_dir.clone())
-    };
-    let info = crate::nexus::file_info(&api_key, &link).await?;
-    // Announce the file before the transfer starts. Resolving the link takes a
-    // moment, and until this arrives the interface has nothing to show but a
-    // spinner.
-    let announced_total = (info.size_bytes > 0).then_some(info.size_bytes);
-    let _ = app.emit(
-        "zcom://download-progress",
-        serde_json::json!({"name": info.name, "done": 0, "total": announced_total}),
-    );
-    let source = crate::nexus::download_link(&api_key, &link).await?;
-    let destination = cache_dir.join("downloads").join(&info.file_name);
-    let emitter = app.clone();
-    let name = info.name.clone();
-    // One event per chunk floods the webview on a large file and makes the
-    // window it is meant to keep responsive stutter instead.
-    let mut last = std::time::Instant::now();
-    crate::nexus::download_to(&source, &destination, move |done, total| {
-        let complete = total.is_some_and(|total| done >= total);
-        if !complete && last.elapsed() < Duration::from_millis(100) {
-            return;
-        }
-        last = std::time::Instant::now();
-        let _ = emitter.emit(
-            "zcom://download-progress",
-            serde_json::json!({"name": name, "done": done, "total": total.or(announced_total)}),
-        );
-    })
-    .await?;
-    let ctx = app.state::<AppContext>();
-    // Remember what this archive is, so the mod installed from it can be
-    // checked against Nexus later.
-    let path = destination.display().to_string();
-    if let Err(error) = database::open(&ctx.db_path).and_then(|conn| {
-        database::record_nexus_source(
+        let _ = operations::record(
             &conn,
-            &path,
-            link.mod_id,
-            link.file_id,
-            info.version.as_deref(),
-            &info.file_name,
-        )
-    }) {
-        log(
-            &ctx,
-            "warn",
-            "nexus_source_not_recorded",
-            &error.to_string(),
+            "profile-switch",
+            "completed",
+            &format!("Activated profile {}", result.summary.name),
+            serde_json::json!({"profileId": &result.summary.id}),
         );
-    }
-    log(
-        &ctx,
-        "info",
-        "nexus_download",
-        &format!("mod_id={} file_id={}", link.mod_id, link.file_id),
-    );
-    Ok(path)
-}
-
-/// How long a stored result stands before an unforced check goes back to the
-/// network. Nexus rate-limits by the hour and mod files change rarely, so a
-/// start-up check that finds a recent result stays offline.
-const UPDATE_CHECK_INTERVAL_HOURS: i64 = 6;
-const LAST_CHECK_KEY: &str = "nexus_update_checked_at";
-
-/// Whether the stored result is recent enough to stand in for a fresh check.
-/// A timestamp that cannot be read is treated as no check at all.
-fn checked_recently(recorded: Option<String>) -> bool {
-    recorded
-        .and_then(|last| chrono::DateTime::parse_from_rfc3339(&last).ok())
-        .is_some_and(|last| {
-            chrono::Utc::now().signed_duration_since(last)
-                < chrono::Duration::hours(UPDATE_CHECK_INTERVAL_HOURS)
-        })
-}
-
-/// Builds the report from what is already recorded. No network access: an
-/// update is the stored newest id for that exact installed file's variant when
-/// it is later than the installed one.
-fn update_report(
-    conn: &rusqlite::Connection,
-    from_cache: bool,
-    identified: usize,
-    problem: Option<String>,
-) -> Result<ModUpdateReport> {
-    let installs = database::nexus_installs(conn)?;
-    let latest = database::nexus_latest(conn)?;
-    let mut updates = Vec::new();
-    for install in &installs {
-        let Some(known) = latest.get(&(install.nexus_mod_id, install.nexus_file_id)) else {
-            continue;
-        };
-        if !crate::nexus::is_newer(known.latest_file_id, install.nexus_file_id) {
-            continue;
-        }
-        updates.push(ModUpdate {
-            mod_id: install.id.clone(),
-            name: install.name.clone(),
-            installed_version: install.version.clone(),
-            installed_file_id: install.nexus_file_id,
-            nexus_mod_id: install.nexus_mod_id,
-            latest_file_id: known.latest_file_id,
-            latest_version: known.latest_version.clone(),
-            latest_file_name: known.latest_file_name.clone(),
-            page_url: crate::nexus::mod_files_url(install.nexus_mod_id),
-            nxm_url: crate::nexus::nxm_url(install.nexus_mod_id, known.latest_file_id),
-            checked_at: known.checked_at.clone(),
-        });
-    }
-    Ok(ModUpdateReport {
-        updates,
-        tracked: installs.len(),
-        identified,
-        unmatched: database::untracked_installs(conn)?.len(),
-        ignored: database::ignored_count(conn)?,
-        checked_at: database::get_setting(conn, LAST_CHECK_KEY)?,
-        from_cache,
-        problem,
+        Ok(result)
     })
 }
 
-/// Matches installed mods to their Nexus page by the MD5 of the archive they
-/// were installed from.
-///
-/// This is what covers a library that existed before the manager recorded
-/// provenance, and anything installed from an archive downloaded in a browser.
-/// Only the uploaded archive is indexed by Nexus, so a mod whose archive has
-/// been deleted, or that never came from Nexus, stays unmatched. An archive
-/// Nexus does not recognise is remembered as such and is retried only when the
-/// user asks for a check themselves.
-async fn identify_untracked(
-    app: &AppHandle,
-    api_key: &str,
-    retry: bool,
-) -> Result<(usize, Option<String>)> {
-    let candidates: Vec<(String, PathBuf)> = {
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        database::untracked_installs(&conn)?
-            .into_iter()
-            .filter(|install| retry || install.attempt.is_none())
-            .filter_map(|install| {
-                let archive = PathBuf::from(install.source_archive?);
-                archive.is_file().then_some((install.id, archive))
-            })
-            .collect()
-    };
-    let mut identified = 0;
-    for (mod_id, archive) in candidates {
-        // An unreadable archive is no worse than a missing one.
-        let Ok(md5) = md5_of(&archive) else { continue };
-        // A rate limit or a rejected key ends the pass; what was matched before
-        // it stands, and the caller reports why the rest was not attempted.
-        let found = match crate::nexus::md5_search(api_key, &md5).await {
-            Ok(found) => found,
-            Err(error) => return Ok((identified, Some(error.to_string()))),
-        };
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        if let Some((nexus_mod_id, nexus_file_id)) = found {
-            database::set_nexus_ids(&conn, &mod_id, nexus_mod_id, nexus_file_id)?;
-            identified += 1;
-        }
-        database::record_identification(&conn, &mod_id, &md5, found.is_some())?;
-    }
-    Ok((identified, None))
-}
-
-/// Nexus indexes uploaded files by MD5, so that is the digest this needs. It is
-/// never used here to decide that a file is unchanged or trustworthy.
-fn md5_of(path: &Path) -> Result<String> {
-    use md5::{Digest, Md5};
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
-    let mut hash = Md5::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hash.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hash.finalize()))
-}
-
-/// Points an installed mod at a Nexus mod the user names, for a mod whose
-/// archive is gone or was never a Nexus download. The file recorded as
-/// installed is the one carrying the installed version, so an update is only
-/// reported when Nexus really has moved past it.
 #[tauri::command]
-pub async fn link_mod_to_nexus(
-    mod_id: String,
-    reference: String,
-    app: AppHandle,
-) -> Result<ModUpdateReport> {
-    let nexus_mod_id = crate::nexus::parse_mod_reference(&reference)?;
-    let (api_key, installed_version) = {
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        let version = rusqlite::OptionalExtension::optional(conn.query_row(
-            "SELECT version FROM mods WHERE id=?1",
-            [&mod_id],
-            |row| row.get::<_, Option<String>>(0),
-        ))?
-        .ok_or_else(|| AppError::Other("That mod is no longer installed.".into()))?;
-        let key = crate::credentials::load(&conn).ok_or(AppError::NexusKeyMissing)?;
-        (key, version)
-    };
-    let files = crate::nexus::files(&api_key, nexus_mod_id).await?;
-    let file = crate::nexus::file_for_version(&files, installed_version.as_deref())
-        .ok_or_else(|| AppError::Other("That Nexus mod offers no files to match.".into()))?;
-    let latest = crate::nexus::newest_for_installed(&files, file.file_id).map(|newest| {
-        database::NexusLatest {
-            latest_file_id: newest.file_id,
-            latest_version: newest.version.clone(),
-            latest_file_name: newest.file_name.clone(),
-            checked_at: chrono::Utc::now().to_rfc3339(),
-        }
-    });
-    let ctx = app.state::<AppContext>();
-    let conn = database::open(&ctx.db_path)?;
-    // Naming a page is an instruction to check it, whatever was decided before.
-    database::set_nexus_checked(&conn, &mod_id, true)?;
-    database::set_nexus_ids(&conn, &mod_id, nexus_mod_id, file.file_id)?;
-    database::clear_nexus_latest_for_file(&conn, nexus_mod_id, file.file_id)?;
-    if let Some(latest) = latest {
-        database::record_nexus_latest(&conn, nexus_mod_id, file.file_id, &latest)?;
-    }
-    log(
-        &ctx,
-        "info",
-        "nexus_mod_linked",
-        &format!(
-            "mod_id={mod_id} nexus_mod_id={nexus_mod_id} file_id={}",
-            file.file_id
-        ),
-    );
-    update_report(&conn, false, 0, None)
-}
-
-/// Takes a mod out of update checking, or puts it back.
-///
-/// This covers both halves of the same decision: a mod linked to the wrong page
-/// and a mod that never came from Nexus at all. Turning checking off drops the
-/// link and keeps the mod out of the identification lookup, so a check the user
-/// asks for does not quietly match and link it again.
-#[tauri::command]
-pub fn set_mod_checked(
-    mod_id: String,
-    checked: bool,
+pub fn export_profile_lock(
+    profile_id: String,
+    path: String,
     ctx: State<'_, AppContext>,
-) -> Result<ModUpdateReport> {
-    let conn = connection(&ctx)?;
-    database::set_nexus_checked(&conn, &mod_id, checked)?;
-    log(
-        &ctx,
-        "info",
-        if checked {
-            "nexus_checks_resumed"
-        } else {
-            "nexus_checks_stopped"
-        },
-        &format!("mod_id={mod_id}"),
-    );
-    update_report(&conn, true, 0, None)
-}
-
-/// Turns the start-up check on or off, on its own.
-///
-/// Every other control in the Nexus panel takes effect the moment it is used,
-/// so a checkbox that quietly needed **Save settings** as well read as one that
-/// did not work — and any refresh overwrote the pending toggle before it could
-/// be saved. Writing the single setting also avoids committing whatever else is
-/// half-edited on the Settings page.
-#[tauri::command]
-pub fn set_nexus_auto_check(enabled: bool, ctx: State<'_, AppContext>) -> Result<()> {
-    let conn = connection(&ctx)?;
-    database::set_setting(&conn, "nexus_auto_update_check", &enabled.to_string())?;
-    log(
-        &ctx,
-        "info",
-        "nexus_auto_check_changed",
-        &format!("enabled={enabled}"),
-    );
+) -> Result<()> {
+    let game_build = game(&ctx)?.steam_build_id;
+    let lock = profiles::lockfile(&connection(&ctx)?, &profile_id, game_build)?;
+    std::fs::write(path, serde_json::to_vec_pretty(&lock)?)?;
     Ok(())
 }
 
-/// What the last check found. Read on every refresh so the library can show
-/// known updates without reaching Nexus.
 #[tauri::command]
-pub fn mod_updates(ctx: State<'_, AppContext>) -> Result<ModUpdateReport> {
-    update_report(&connection(&ctx)?, true, 0, None)
+pub fn import_profile_lock(path: String, ctx: State<'_, AppContext>) -> Result<ProfileDetail> {
+    let lock: ProfileLock = serde_json::from_slice(&std::fs::read(path)?)?;
+    profiles::import_lock(&connection(&ctx)?, &lock)
 }
 
-/// Asks Nexus which files each tracked mod now offers.
-///
-/// `force` is the Mods page button. Without it the stored result stands for
-/// `UPDATE_CHECK_INTERVAL`, which is what the opt-in start-up check relies on
-/// so a manager opened repeatedly does not spend the hourly API allowance.
 #[tauri::command]
-pub async fn check_mod_updates(force: bool, app: AppHandle) -> Result<ModUpdateReport> {
-    let api_key = {
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        // Nothing installed at all, so there is neither anything to check nor
-        // anything to identify.
-        if database::nexus_installs(&conn)?.is_empty()
-            && database::untracked_installs(&conn)?.is_empty()
-        {
-            return update_report(&conn, true, 0, None);
-        }
-        if !force && checked_recently(database::get_setting(&conn, LAST_CHECK_KEY)?) {
-            return update_report(&conn, true, 0, None);
-        }
-        let Some(api_key) = crate::credentials::load(&conn) else {
-            if force {
-                return Err(AppError::NexusKeyMissing);
-            }
-            return update_report(
-                &conn,
-                true,
-                0,
-                Some("No Nexus Mods API key is stored, so installed mods were not checked.".into()),
-            );
-        };
-        api_key
-    };
+pub fn list_snapshots(ctx: State<'_, AppContext>) -> Result<Vec<SnapshotSummary>> {
+    profiles::snapshots(&connection(&ctx)?)
+}
 
-    // A forced check is also the moment to confirm the stored key still works
-    // and whether the account is premium, which is what decides if a direct
-    // download can be offered instead of a trip to the website.
-    let account = match force {
-        true => crate::nexus::validate(&api_key).await.ok(),
-        false => None,
-    };
-    // Mods with no provenance are matched by their archive first, so anything
-    // recognised here is checked in this same pass. An archive Nexus has
-    // already refused is offered again only when the user asked for the check.
-    let (identified, mut problem) = identify_untracked(&app, &api_key, force).await?;
-    let (installs, targets) = {
-        let ctx = app.state::<AppContext>();
-        let conn = database::open(&ctx.db_path)?;
-        let installs = database::nexus_installs(&conn)?;
-        let mut targets: Vec<u64> = installs
-            .iter()
-            .map(|install| install.nexus_mod_id)
-            .collect();
-        targets.sort_unstable();
-        // One request per Nexus mod, however many local mods came out of it.
-        targets.dedup();
-        (installs, targets)
-    };
-    let mut found: Vec<(u64, u64, database::NexusLatest)> = Vec::new();
-    let mut successful = Vec::new();
-    let mut failed = 0usize;
-    for nexus_mod_id in targets.iter().take_while(|_| problem.is_none()) {
-        match crate::nexus::files(&api_key, *nexus_mod_id).await {
-            Ok(files) => {
-                successful.push(*nexus_mod_id);
-                let mut installed_file_ids: Vec<u64> = installs
-                    .iter()
-                    .filter(|install| install.nexus_mod_id == *nexus_mod_id)
-                    .map(|install| install.nexus_file_id)
-                    .collect();
-                installed_file_ids.sort_unstable();
-                installed_file_ids.dedup();
-                for installed_file_id in installed_file_ids {
-                    if let Some(file) =
-                        crate::nexus::newest_for_installed(&files, installed_file_id)
-                    {
-                        found.push((
-                            *nexus_mod_id,
-                            installed_file_id,
-                            database::NexusLatest {
-                                latest_file_id: file.file_id,
-                                latest_version: file.version.clone(),
-                                latest_file_name: file.file_name.clone(),
-                                checked_at: String::new(),
-                            },
-                        ));
-                    }
-                }
-            }
-            // Stopping on a rate limit or a rejected key keeps the remaining
-            // requests from making either worse; what was already read stands.
-            Err(error @ (AppError::NexusRateLimited | AppError::NexusUnauthorized)) => {
-                problem = Some(error.to_string());
-                break;
-            }
-            // A single mod can be hidden, deleted, or moderated. That is not a
-            // reason to abandon the rest of the library.
-            Err(_) => failed += 1,
-        }
+#[tauri::command]
+pub fn create_snapshot(
+    label: String,
+    last_known_good: bool,
+    ctx: State<'_, AppContext>,
+) -> Result<SnapshotSummary> {
+    profiles::snapshot(
+        &connection(&ctx)?,
+        &label,
+        "manual",
+        last_known_good,
+        game(&ctx)?.steam_build_id,
+    )
+}
+
+#[tauri::command]
+pub fn restore_snapshot(snapshot_id: String, ctx: State<'_, AppContext>) -> Result<ProfileDetail> {
+    package_operation(&ctx, || {
+        let (game_info, game_path) = require_game(&ctx)?;
+        let library = mods_dir(&ctx)?;
+        let mut conn = connection(&ctx)?;
+        let profile = profiles::restore_snapshot(
+            &mut conn,
+            &library,
+            &game_path,
+            &ctx.data_dir.join("load-order-operation.json"),
+            &snapshot_id,
+            game_info.steam_build_id,
+        )?;
+        let _ = operations::record(
+            &conn,
+            "snapshot-restore",
+            "completed",
+            &format!("Restored checkpoint as {}", profile.summary.name),
+            serde_json::json!({"snapshotId": snapshot_id, "profileId": &profile.summary.id}),
+        );
+        Ok(profile)
+    })
+}
+
+#[tauri::command]
+pub fn compatibility_report(ctx: State<'_, AppContext>) -> Result<CompatibilityReport> {
+    compatibility::report_for_build(&connection(&ctx)?, game(&ctx)?.steam_build_id.as_deref())
+}
+
+#[tauri::command]
+pub async fn update_compatibility_catalog(app: AppHandle) -> Result<CompatibilityReport> {
+    let url = option_env!("ZERO_MOD_MANAGER_CATALOG_URL")
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::Other(
+                "No signed compatibility catalog URL is configured for this build.".into(),
+            )
+        })?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| AppError::Network(error.to_string()))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| AppError::Network(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(AppError::Network(format!(
+            "catalog request returned HTTP {}",
+            response.status()
+        )));
     }
-    if problem.is_none() && failed > 0 {
-        problem = Some(format!(
-            "{failed} of {} mods could not be read on Nexus Mods. They may have been hidden or removed.",
-            targets.len()
+    if response
+        .content_length()
+        .is_some_and(|length| length > 8 * 1024 * 1024)
+    {
+        return Err(AppError::CatalogUntrusted(
+            "catalog response exceeds the 8 MiB safety limit".into(),
         ));
     }
-
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AppError::Network(error.to_string()))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err(AppError::CatalogUntrusted(
+            "catalog response exceeds the 8 MiB safety limit".into(),
+        ));
+    }
     let ctx = app.state::<AppContext>();
-    let conn = database::open(&ctx.db_path)?;
-    let now = chrono::Utc::now().to_rfc3339();
-    if let Some(account) = account {
-        database::set_setting(&conn, "nexus_account_name", &account.name)?;
-        database::set_setting(&conn, "nexus_premium", &account.premium.to_string())?;
-    }
-    for nexus_mod_id in successful {
-        database::clear_nexus_latest(&conn, nexus_mod_id)?;
-    }
-    for (nexus_mod_id, installed_file_id, latest) in &found {
-        database::record_nexus_latest(
-            &conn,
-            *nexus_mod_id,
-            *installed_file_id,
-            &database::NexusLatest {
-                checked_at: now.clone(),
-                ..latest.clone()
-            },
-        )?;
-    }
-    // Only a complete pass advances the throttle, so a run cut short by a rate
-    // limit is retried on the next opportunity rather than waiting it out.
-    if problem.is_none() {
-        database::set_setting(&conn, LAST_CHECK_KEY, &now)?;
-    }
-    let report = update_report(&conn, false, identified, problem)?;
-    log(
-        &ctx,
-        "info",
-        "nexus_update_check",
-        &format!(
-            "checked={} identified={} tracked={} unmatched={} updates={}",
-            found.len(),
-            identified,
-            report.tracked,
-            report.unmatched,
-            report.updates.len()
-        ),
+    let conn = connection(&ctx)?;
+    let version = compatibility::install(
+        &conn,
+        &bytes,
+        &ctx.data_dir.join("catalog/compatibility.signed.json"),
+    )?;
+    let _ = operations::record(
+        &conn,
+        "catalog",
+        "completed",
+        &format!("Compatibility catalog {version} verified"),
+        serde_json::json!({"version": version}),
     );
-    Ok(report)
+    compatibility::report_for_build(&conn, game(&ctx)?.steam_build_id.as_deref())
+}
+
+#[tauri::command]
+pub fn activity(ctx: State<'_, AppContext>) -> Result<Vec<OperationRecord>> {
+    operations::list(&connection(&ctx)?, 100)
+}
+
+#[tauri::command]
+pub fn list_config_documents(ctx: State<'_, AppContext>) -> Result<Vec<ConfigDocument>> {
+    let (_, game_path) = require_game(&ctx)?;
+    config_workbench::list(&game_path)
+}
+
+#[tauri::command]
+pub fn read_config_document(path: String, ctx: State<'_, AppContext>) -> Result<ConfigDocument> {
+    let (_, game_path) = require_game(&ctx)?;
+    config_workbench::read(&game_path, Path::new(&path))
+}
+
+#[tauri::command]
+pub fn preview_config_change(
+    path: String,
+    content: String,
+    ctx: State<'_, AppContext>,
+) -> Result<ConfigChangePreview> {
+    let (_, game_path) = require_game(&ctx)?;
+    config_workbench::preview(&game_path, Path::new(&path), &content)
+}
+
+#[tauri::command]
+pub fn apply_config_change(
+    path: String,
+    content: String,
+    expected_sha256: String,
+    ctx: State<'_, AppContext>,
+) -> Result<ConfigPatchRecord> {
+    let (_, game_path) = require_game(&ctx)?;
+    let conn = connection(&ctx)?;
+    profiles::snapshot(
+        &conn,
+        "Before configuration change",
+        "config",
+        false,
+        game(&ctx)?.steam_build_id,
+    )?;
+    let patch = config_workbench::apply(
+        &conn,
+        &game_path,
+        &ctx.data_dir,
+        Path::new(&path),
+        &content,
+        &expected_sha256,
+    )?;
+    let _ = operations::record(
+        &conn,
+        "config",
+        "completed",
+        "Configuration change applied",
+        serde_json::json!({"path": &patch.path, "patchId": &patch.id}),
+    );
+    Ok(patch)
+}
+
+#[tauri::command]
+pub fn config_history(ctx: State<'_, AppContext>) -> Result<Vec<ConfigPatchRecord>> {
+    config_workbench::history(&connection(&ctx)?)
+}
+
+#[tauri::command]
+pub fn rollback_config_change(patch_id: String, ctx: State<'_, AppContext>) -> Result<()> {
+    let (_, game_path) = require_game(&ctx)?;
+    let conn = connection(&ctx)?;
+    config_workbench::rollback(&conn, &game_path, &patch_id)?;
+    let _ = operations::record(
+        &conn,
+        "config",
+        "rolled-back",
+        "Configuration checkpoint restored",
+        serde_json::json!({"patchId": patch_id}),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn launch_preflight(ctx: State<'_, AppContext>) -> Result<LaunchPreflight> {
+    let conn = connection(&ctx)?;
+    let game = game(&ctx)?;
+    let settings = database::settings(&conn)?;
+    let runtime = ue4ss::detect(
+        game.path.as_deref().map(Path::new),
+        game.compat_data_path.as_deref().map(Path::new),
+    );
+    sessions::preflight(&conn, &game, &runtime, &settings)
+}
+
+fn restore_temporary_profile(
+    db_path: PathBuf,
+    library: PathBuf,
+    game_path: PathBuf,
+    data_dir: PathBuf,
+    profile_id: String,
+) {
+    let mut seen_running = false;
+    for _ in 0..120 {
+        if deployment::game_is_running() {
+            seen_running = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    if seen_running {
+        while deployment::game_is_running() {
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    }
+    if let Ok(mut conn) = database::open(&db_path) {
+        let result = profiles::activate(
+            &mut conn,
+            &library,
+            &game_path,
+            &data_dir.join("load-order-operation.json"),
+            &profile_id,
+            None,
+        );
+        let status = if result.is_ok() {
+            "completed"
+        } else {
+            "failed"
+        };
+        let _ = operations::record(
+            &conn,
+            "temporary-launch-restore",
+            status,
+            "Restored the profile after a temporary launch",
+            serde_json::json!({"profileId": profile_id, "error": result.err().map(|error| error.to_string())}),
+        );
+        if status == "completed" {
+            let _ = database::delete_setting(&conn, "pending_restore_profile");
+        }
+    }
+}
+
+fn launch_deployment_lock(
+    conn: &rusqlite::Connection,
+    profile_id: &str,
+    game_build: Option<String>,
+    mode: &str,
+    enabled_mod_ids: &[String],
+) -> Result<ProfileLock> {
+    if !matches!(mode, "modded" | "vanilla" | "troubleshoot") {
+        return Err(AppError::Other("Unknown launch mode.".into()));
+    }
+    // Temporary launch recovery currently restores the named profile. Do not
+    // let an unapplied saved selection silently become that recovery target.
+    if mode != "modded" && !profiles::preview(conn, profile_id)?.changes.is_empty() {
+        return Err(AppError::Other(
+            "The active profile has saved selections that differ from the installed mods. Open Profiles, review and apply those changes before a vanilla or troubleshoot launch. A normal modded launch can still use the current installed mods.".into(),
+        ));
+    }
+    let mut lock = profiles::deployment_lockfile(conn, profile_id, game_build)?;
+    if mode != "modded" {
+        let selected = enabled_mod_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if mode == "troubleshoot"
+            && selected
+                .iter()
+                .any(|id| !lock.mods.iter().any(|item| &item.id == id))
+        {
+            return Err(AppError::Other(
+                "A selected test mod is no longer installed. Refresh the library and start the test again.".into(),
+            ));
+        }
+        // This lock describes the requested session, not the saved profile or
+        // the full enabled set that will be restored afterward.
+        for item in &mut lock.mods {
+            item.enabled = mode == "troubleshoot" && selected.contains(&item.id);
+        }
+    }
+    Ok(lock)
+}
+
+#[tauri::command]
+pub fn launch_game_mode(
+    mode: String,
+    enabled_mod_ids: Vec<String>,
+    app: AppHandle,
+    ctx: State<'_, AppContext>,
+) -> Result<LaunchReport> {
+    let preflight = launch_preflight(ctx.clone())?;
+    if preflight.status == "blocked" {
+        return Err(AppError::Other(
+            "Launch readiness is blocked. Open Health to resolve the listed problems.".into(),
+        ));
+    }
+    let (game_info, game_path) = require_game(&ctx)?;
+    let conn = connection(&ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other("The previous temporary launch is still restoring its profile. Wait a moment and refresh Health before starting another test.".into()));
+    }
+    let active = profiles::active(&conn)?
+        .ok_or_else(|| AppError::Other("No active profile exists.".into()))?;
+    let lock = launch_deployment_lock(
+        &conn,
+        &active.summary.id,
+        game_info.steam_build_id.clone(),
+        &mode,
+        &enabled_mod_ids,
+    )?;
+    let lock_json = serde_json::to_string(&lock)?;
+    let settings = database::settings(&conn)?;
+    let launcher = if settings
+        .custom_executable_path
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
+        "custom"
+    } else if game_info.source == "ea" {
+        "ea"
+    } else {
+        "steam"
+    };
+    let executable = settings
+        .custom_executable_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| game_path.join("SWZeroCompany/Binaries/Win64/SWZeroCompany.exe"));
+    validate_launch_file(&executable)?;
+    let executable_sha256 = executable
+        .is_file()
+        .then(|| deployment::sha256(&executable))
+        .transpose()?;
+    let session = sessions::begin(
+        &conn,
+        &mode,
+        launcher,
+        game_info.steam_build_id.as_deref(),
+        executable_sha256.as_deref(),
+        // A profile requirement is not a measurement of the installed runtime.
+        None,
+        &lock_json,
+    )?;
+
+    if mode != "modded" {
+        deployment::ensure_game_stopped()?;
+        profiles::snapshot(
+            &conn,
+            &format!("Before {mode} launch"),
+            "temporary-launch",
+            false,
+            game_info.steam_build_id.clone(),
+        )?;
+        let selected = enabled_mod_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        let library = mods_dir(&ctx)?;
+        for installed in database::list_mods(&conn)? {
+            let desired = mode == "troubleshoot" && selected.contains(&installed.id);
+            if installed.enabled != desired {
+                deployment::set_enabled(
+                    &conn,
+                    &library,
+                    &game_path,
+                    &installed.id,
+                    desired,
+                    false,
+                )?;
+            }
+        }
+        database::set_setting(&conn, "pending_restore_profile", &active.summary.id)?;
+    }
+
+    let method = match perform_launch(&app, &ctx) {
+        Ok(method) => method,
+        Err(error) => {
+            if mode != "modded" {
+                let mut rollback = connection(&ctx)?;
+                let library = mods_dir(&ctx)?;
+                let restored = profiles::activate(
+                    &mut rollback,
+                    &library,
+                    &game_path,
+                    &ctx.data_dir.join("load-order-operation.json"),
+                    &active.summary.id,
+                    game_info.steam_build_id,
+                );
+                if restored.is_ok() {
+                    let _ = database::delete_setting(&rollback, "pending_restore_profile");
+                }
+            }
+            return Err(error);
+        }
+    };
+    if mode != "modded" {
+        let db_path = ctx.db_path.clone();
+        let library = mods_dir(&ctx)?.clone();
+        let data_dir = ctx.data_dir.clone();
+        let profile_id = active.summary.id.clone();
+        std::thread::spawn(move || {
+            restore_temporary_profile(db_path, library, game_path, data_dir, profile_id)
+        });
+    }
+    let _ = operations::record(
+        &conn,
+        "launch",
+        "completed",
+        &format!("Requested {mode} launch"),
+        serde_json::json!({"sessionId": &session.id, "launcher": launcher}),
+    );
+    Ok(LaunchReport {
+        method,
+        session_id: Some(session.id),
+        mode,
+    })
+}
+
+#[tauri::command]
+pub fn complete_launch_session(
+    session_id: String,
+    outcome: String,
+    evidence: Option<String>,
+    ctx: State<'_, AppContext>,
+) -> Result<LaunchSession> {
+    sessions::complete(
+        &connection(&ctx)?,
+        &session_id,
+        &outcome,
+        evidence.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn launch_sessions(ctx: State<'_, AppContext>) -> Result<Vec<LaunchSession>> {
+    sessions::list(&connection(&ctx)?)
+}
+
+#[tauri::command]
+pub fn start_guided_isolation(ctx: State<'_, AppContext>) -> Result<IsolationSession> {
+    deployment::ensure_game_stopped()?;
+    let game = game(&ctx)?;
+    let conn = connection(&ctx)?;
+    profiles::snapshot(
+        &conn,
+        "Before guided isolation",
+        "guided-isolation",
+        false,
+        game.steam_build_id.clone(),
+    )?;
+    let result = isolation::start(&conn, game.steam_build_id)?;
+    let _ = operations::record(
+        &conn,
+        "isolation",
+        "pending",
+        "Guided isolation started",
+        serde_json::json!({"isolationId": &result.id, "groups": result.candidate_groups.len()}),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn active_guided_isolation(ctx: State<'_, AppContext>) -> Result<Option<IsolationSession>> {
+    isolation::active(&connection(&ctx)?)
+}
+
+#[tauri::command]
+pub fn advance_guided_isolation(
+    isolation_id: String,
+    outcome: String,
+    ctx: State<'_, AppContext>,
+) -> Result<IsolationSession> {
+    deployment::ensure_game_stopped()?;
+    let conn = connection(&ctx)?;
+    if database::get_setting(&conn, "pending_restore_profile")?.is_some() {
+        return Err(AppError::Other("The temporary launch is still restoring the original profile. Wait a moment, then record the observation.".into()));
+    }
+    let result = isolation::advance(&conn, &isolation_id, &outcome)?;
+    let _ = operations::record(
+        &conn,
+        "isolation-observation",
+        "completed",
+        "Guided isolation observation recorded",
+        serde_json::json!({"isolationId": isolation_id, "outcome": outcome, "phase": &result.phase, "remainingGroups": result.candidate_groups.len()}),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn cancel_guided_isolation(isolation_id: String, ctx: State<'_, AppContext>) -> Result<()> {
+    isolation::cancel(&connection(&ctx)?, &isolation_id)
+}
+
+#[tauri::command]
+pub fn support_bundle_preview(ctx: State<'_, AppContext>) -> Result<SupportBundlePreview> {
+    let conn = connection(&ctx)?;
+    let game = game(&ctx)?;
+    let runtime = ue4ss::detect(
+        game.path.as_deref().map(Path::new),
+        game.compat_data_path.as_deref().map(Path::new),
+    );
+    Ok(support::preview(
+        profiles::active(&conn)?.is_some(),
+        runtime
+            .log_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()),
+    ))
+}
+
+#[tauri::command]
+pub fn create_support_bundle(
+    path: String,
+    ctx: State<'_, AppContext>,
+) -> Result<SupportBundleReport> {
+    let conn = connection(&ctx)?;
+    let game = game(&ctx)?;
+    let runtime = ue4ss::detect(
+        game.path.as_deref().map(Path::new),
+        game.compat_data_path.as_deref().map(Path::new),
+    );
+    let diagnostics = diagnostics::run(&conn, &game, &runtime, &tool(&ctx)?)?;
+    let compatibility = compatibility::report_for_build(&conn, game.steam_build_id.as_deref())?;
+    let active = profiles::active(&conn)?;
+    let lock = active
+        .as_ref()
+        .map(|profile| {
+            profiles::deployment_lockfile(&conn, &profile.summary.id, game.steam_build_id.clone())
+        })
+        .transpose()?;
+    let activity = operations::list(&conn, 100)?;
+    let launch_sessions = sessions::list(&conn)?;
+    let application = serde_json::json!({
+        "application": "Zero Mod Manager", "version": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS, "architecture": std::env::consts::ARCH,
+        "game": game, "runtime": runtime,
+    });
+    let compatibility_value = serde_json::to_value(compatibility)?;
+    let lock_value = lock.map(serde_json::to_value).transpose()?;
+    let activity_value = serde_json::to_value(activity)?;
+    let sessions_value = serde_json::to_value(launch_sessions)?;
+    support::create(
+        Path::new(&path),
+        support::BundleContent {
+            application: &application,
+            diagnostics: &diagnostics.text,
+            compatibility: &compatibility_value,
+            profile_lock: lock_value.as_ref(),
+            activity: &activity_value,
+            sessions: &sessions_value,
+            application_log: &ctx.logs_dir.join("application.jsonl"),
+            ue4ss_log: runtime.log_path.as_deref().map(Path::new),
+        },
+    )
 }
 
 #[cfg(test)]
 mod update_tests {
     use super::{
-        checked_recently, configured_executable, copy_library_for_move, manual_game_or_unavailable,
-        replaced_by, update_report, version_is_newer,
+        configured_executable, copy_library_for_move, launch_deployment_lock,
+        manual_game_or_unavailable, replaced_by, version_is_newer,
     };
     use crate::{
         database,
         models::{AppSettings, PayloadFile, StagedMod},
+        profiles,
     };
     use std::{fs, path::PathBuf};
     use tempfile::tempdir;
+
+    #[test]
+    fn launch_records_deployment_not_unapplied_profile_selections() {
+        let directory = tempdir().unwrap();
+        let conn = database::open(&directory.path().join("launch-evidence.sqlite3")).unwrap();
+        conn.execute_batch("INSERT INTO mods(id,name,mod_type,installed_at,enabled,manifest_id) VALUES('on','Enabled armor','pak','2026-09-22',1,'shared-manifest'),('off','Disabled armor','pak','2026-09-22',0,'shared-manifest');").unwrap();
+        profiles::capture_active(&conn).unwrap();
+        let active = profiles::active(&conn).unwrap().unwrap();
+        profiles::set_mod_state(&conn, &active.summary.id, "on", false, None).unwrap();
+        profiles::set_mod_state(&conn, &active.summary.id, "off", true, None).unwrap();
+
+        let lock = launch_deployment_lock(&conn, &active.summary.id, None, "modded", &[]).unwrap();
+        assert!(
+            lock.mods
+                .iter()
+                .find(|item| item.id == "on")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            !lock
+                .mods
+                .iter()
+                .find(|item| item.id == "off")
+                .unwrap()
+                .enabled
+        );
+        for mode in ["vanilla", "troubleshoot"] {
+            let error =
+                launch_deployment_lock(&conn, &active.summary.id, None, mode, &[]).unwrap_err();
+            assert!(error.to_string().contains("review and apply"));
+        }
+        assert_eq!(database::counts(&conn).unwrap().1, 1);
+    }
+
+    #[test]
+    fn temporary_session_lock_records_only_the_requested_test_selection() {
+        let directory = tempdir().unwrap();
+        let conn = database::open(&directory.path().join("temporary-evidence.sqlite3")).unwrap();
+        conn.execute_batch("INSERT INTO mods(id,name,mod_type,installed_at,enabled) VALUES('on','Enabled armor','pak','2026-09-22',1),('off','Disabled armor','pak','2026-09-22',0);").unwrap();
+        profiles::capture_active(&conn).unwrap();
+        let active = profiles::active(&conn).unwrap().unwrap();
+        let test = launch_deployment_lock(
+            &conn,
+            &active.summary.id,
+            None,
+            "troubleshoot",
+            &["off".into()],
+        )
+        .unwrap();
+        assert!(
+            !test
+                .mods
+                .iter()
+                .find(|item| item.id == "on")
+                .unwrap()
+                .enabled
+        );
+        assert!(
+            test.mods
+                .iter()
+                .find(|item| item.id == "off")
+                .unwrap()
+                .enabled
+        );
+        let vanilla =
+            launch_deployment_lock(&conn, &active.summary.id, None, "vanilla", &[]).unwrap();
+        assert!(vanilla.mods.iter().all(|item| !item.enabled));
+        assert!(launch_deployment_lock(
+            &conn,
+            &active.summary.id,
+            None,
+            "troubleshoot",
+            &["missing".into()]
+        )
+        .is_err());
+        assert!(
+            launch_deployment_lock(&conn, &active.summary.id, None, "unsupported-mode", &[])
+                .is_err()
+        );
+        assert!(
+            database::list_mods(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == "on")
+                .unwrap()
+                .enabled
+        );
+    }
 
     #[test]
     fn compares_release_versions_numerically() {
@@ -2308,6 +2975,10 @@ mod update_tests {
         assert!(version_is_newer("0.1.10", "0.1.9"));
         assert!(!version_is_newer("v0.1.4", "0.1.4"));
         assert!(!version_is_newer("0.1.3", "0.1.4"));
+        assert!(version_is_newer("0.7.0", "0.7.0-rc.2"));
+        assert!(version_is_newer("0.7.0-rc.10", "0.7.0-rc.2"));
+        assert!(!version_is_newer("0.7.0-rc.2", "0.7.0"));
+        assert!(!version_is_newer("invalid", "0.7.0"));
     }
 
     #[test]
@@ -2378,233 +3049,6 @@ mod update_tests {
         assert!(source.is_dir());
     }
 
-    /// An installed mod that arrived through the handoff, recorded the way the
-    /// download and installation commands record one between them.
-    fn installed_from_nexus(
-        conn: &rusqlite::Connection,
-        id: &str,
-        archive: &str,
-        nexus_mod_id: u64,
-        file_id: u64,
-    ) {
-        conn.execute(
-            "INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,load_priority) \
-             VALUES(?1,?1,'1.0','iostore','',?2,'now',1,1)",
-            rusqlite::params![id, archive],
-        )
-        .unwrap();
-        database::record_nexus_source(conn, archive, nexus_mod_id, file_id, Some("1.0"), "mod.zip")
-            .unwrap();
-        assert!(database::link_nexus_source(conn, id, archive).unwrap());
-    }
-
-    fn latest(file_id: u64, version: &str) -> database::NexusLatest {
-        database::NexusLatest {
-            latest_file_id: file_id,
-            latest_version: Some(version.into()),
-            latest_file_name: format!("mod-{version}.zip"),
-            checked_at: "2026-09-01T00:00:00+00:00".into(),
-        }
-    }
-
-    #[test]
-    fn an_archive_the_user_picked_by_hand_carries_no_provenance() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        conn.execute(
-            "INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,load_priority) \
-             VALUES('local','Local','1.0','iostore','','/home/user/mod.zip','now',1,1)",
-            [],
-        )
-        .unwrap();
-        assert!(!database::link_nexus_source(&conn, "local", "/home/user/mod.zip").unwrap());
-        assert!(database::nexus_installs(&conn).unwrap().is_empty());
-        let report = update_report(&conn, true, 0, None).unwrap();
-        assert_eq!((report.tracked, report.updates.len()), (0, 0));
-    }
-
-    #[test]
-    fn only_a_later_file_than_the_installed_one_is_an_update() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        installed_from_nexus(&conn, "unlocked", "/cache/unlocked.zip", 34, 200);
-        // The same file that is installed, and an older one, are not updates.
-        for known in [latest(200, "1.3"), latest(180, "1.2")] {
-            database::record_nexus_latest(&conn, 34, 200, &known).unwrap();
-            assert!(update_report(&conn, true, 0, None)
-                .unwrap()
-                .updates
-                .is_empty());
-        }
-        database::record_nexus_latest(&conn, 34, 200, &latest(260, "1.4")).unwrap();
-        let report = update_report(&conn, true, 0, None).unwrap();
-        assert_eq!(report.tracked, 1);
-        let update = &report.updates[0];
-        assert_eq!(update.mod_id, "unlocked");
-        assert_eq!(update.latest_version.as_deref(), Some("1.4"));
-        // The link has to be one this manager would accept back from a browser.
-        assert_eq!(
-            crate::nexus::parse_nxm(&update.nxm_url).unwrap().file_id,
-            260
-        );
-    }
-
-    #[test]
-    fn every_mod_from_one_nexus_page_is_reported() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        // A single archive can install several mods, and each keeps the
-        // provenance of the file it came from.
-        installed_from_nexus(&conn, "core", "/cache/suite.zip", 9, 100);
-        installed_from_nexus(&conn, "extras", "/cache/suite.zip", 9, 100);
-        database::record_nexus_latest(&conn, 9, 100, &latest(150, "2.0")).unwrap();
-        let report = update_report(&conn, true, 0, None).unwrap();
-        assert_eq!(report.updates.len(), 2);
-        assert_eq!(report.tracked, 2);
-    }
-
-    #[test]
-    fn cached_updates_are_scoped_to_the_installed_file_variant() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        installed_from_nexus(&conn, "one-fifty", "/cache/150.zip", 77, 100);
-        installed_from_nexus(&conn, "two-hundred", "/cache/200.zip", 77, 200);
-        database::record_nexus_latest(&conn, 77, 100, &latest(150, "0.2.0")).unwrap();
-        database::record_nexus_latest(&conn, 77, 200, &latest(200, "0.2.0")).unwrap();
-
-        let report = update_report(&conn, true, 0, None).unwrap();
-
-        assert_eq!(report.updates.len(), 1);
-        assert_eq!(report.updates[0].mod_id, "one-fifty");
-        assert_eq!(report.updates[0].latest_file_id, 150);
-    }
-
-    #[test]
-    fn a_library_installed_before_provenance_existed_is_offered_for_identification() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        // Installed from an archive the user still has, from one that is gone,
-        // and adopted from disk with no archive at all.
-        for (id, archive) in [
-            ("kept", "/downloads/kept.zip"),
-            ("gone", "/downloads/gone.zip"),
-            ("adopted", ""),
-        ] {
-            conn.execute(
-                "INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,load_priority) \
-                 VALUES(?1,?1,'1.0','iostore','',?2,'now',1,1)",
-                rusqlite::params![id, archive],
-            )
-            .unwrap();
-        }
-        let untracked = database::untracked_installs(&conn).unwrap();
-        assert_eq!(untracked.len(), 3);
-        // An adopted mod has no archive to offer, so it can only be linked by
-        // hand; the other two are candidates for an MD5 lookup.
-        let adopted = untracked.iter().find(|i| i.id == "adopted").unwrap();
-        assert!(adopted.source_archive.is_none());
-        assert!(untracked.iter().all(|install| install.attempt.is_none()));
-
-        // A refusal is remembered so an automatic check does not ask again.
-        database::record_identification(&conn, "gone", "d41d8cd98f00b204e9800998ecf8427e", false)
-            .unwrap();
-        let untracked = database::untracked_installs(&conn).unwrap();
-        let gone = untracked.iter().find(|i| i.id == "gone").unwrap();
-        assert!(!gone.attempt.as_ref().unwrap().1);
-
-        // A match takes the mod out of the untracked list and into the checked
-        // one, without any download having happened.
-        database::set_nexus_ids(&conn, "kept", 34, 260).unwrap();
-        database::record_identification(&conn, "kept", "0123456789abcdef0123456789abcdef", true)
-            .unwrap();
-        assert_eq!(database::untracked_installs(&conn).unwrap().len(), 2);
-        let installs = database::nexus_installs(&conn).unwrap();
-        assert_eq!(installs.len(), 1);
-        assert_eq!(installs[0].nexus_file_id, 260);
-        let report = update_report(&conn, true, 1, None).unwrap();
-        assert_eq!(
-            (
-                report.tracked,
-                report.identified,
-                report.unmatched,
-                report.ignored
-            ),
-            (1, 1, 2, 0)
-        );
-    }
-
-    #[test]
-    fn stopping_checks_on_a_linked_mod_keeps_it_from_being_relinked() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        installed_from_nexus(&conn, "unlocked", "/cache/unlocked.zip", 34, 200);
-        database::record_identification(
-            &conn,
-            "unlocked",
-            "0123456789abcdef0123456789abcdef",
-            true,
-        )
-        .unwrap();
-        database::record_nexus_latest(&conn, 34, 200, &latest(260, "1.4")).unwrap();
-        assert_eq!(
-            update_report(&conn, true, 0, None).unwrap().updates.len(),
-            1
-        );
-
-        database::set_nexus_checked(&conn, "unlocked", false).unwrap();
-        let report = update_report(&conn, true, 0, None).unwrap();
-        assert_eq!((report.tracked, report.updates.len()), (0, 0));
-        // Out of checking is also out of identification: the archive is still
-        // on disk, and a check the user asks for must not match it and link it
-        // again behind their back.
-        assert!(database::untracked_installs(&conn).unwrap().is_empty());
-        assert_eq!((report.unmatched, report.ignored), (0, 1));
-
-        // Turning it back on offers the archive to Nexus once more.
-        database::set_nexus_checked(&conn, "unlocked", true).unwrap();
-        let untracked = database::untracked_installs(&conn).unwrap();
-        assert_eq!(untracked.len(), 1);
-        assert!(untracked[0].attempt.is_none());
-        assert_eq!(update_report(&conn, true, 0, None).unwrap().ignored, 0);
-    }
-
-    #[test]
-    fn a_mod_that_never_came_from_nexus_can_be_left_out_for_good() {
-        let directory = tempdir().unwrap();
-        let conn = database::open(&directory.path().join("db.sqlite3")).unwrap();
-        conn.execute(
-            "INSERT INTO mods(id,name,version,mod_type,deployment_key,source_archive,installed_at,enabled,load_priority) \
-             VALUES('mine','My own mod','1.0','iostore','','/home/user/dist/mine.zip','now',1,1)",
-            [],
-        )
-        .unwrap();
-        // Until it is excluded it is a candidate on every check the user asks
-        // for, which is a request per check for a mod Nexus will never know.
-        assert_eq!(database::untracked_installs(&conn).unwrap().len(), 1);
-
-        database::set_nexus_checked(&conn, "mine", false).unwrap();
-        assert!(database::untracked_installs(&conn).unwrap().is_empty());
-        let report = update_report(&conn, true, 0, None).unwrap();
-        assert_eq!(
-            (report.tracked, report.unmatched, report.ignored),
-            (0, 0, 1)
-        );
-    }
-
-    #[test]
-    fn a_recent_result_stands_and_an_unreadable_one_does_not() {
-        let now = chrono::Utc::now();
-        assert!(checked_recently(Some(now.to_rfc3339())));
-        assert!(checked_recently(Some(
-            (now - chrono::Duration::hours(5)).to_rfc3339()
-        )));
-        assert!(!checked_recently(Some(
-            (now - chrono::Duration::hours(7)).to_rfc3339()
-        )));
-        assert!(!checked_recently(Some("not a timestamp".into())));
-        assert!(!checked_recently(None));
-    }
-
     #[test]
     fn validates_a_configured_launch_executable_and_uses_its_folder() {
         let directory = tempdir().unwrap();
@@ -2618,6 +3062,17 @@ mod update_tests {
         let (selected, working_directory) = configured_executable(&settings).unwrap().unwrap();
         assert_eq!(selected, executable);
         assert_eq!(working_directory, directory.path());
+    }
+
+    #[test]
+    fn missing_or_empty_launch_file_is_rejected_before_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("game.exe");
+        assert!(super::validate_launch_file(&exe).is_err());
+        std::fs::write(&exe, []).unwrap();
+        assert!(super::validate_launch_file(&exe).is_err());
+        std::fs::write(&exe, b"test-fixture").unwrap();
+        assert!(super::validate_launch_file(&exe).is_ok());
     }
 
     #[test]
@@ -2656,12 +3111,12 @@ mod update_tests {
             version: Some("1.1.1".into()),
             author: None,
             description: None,
+            manifest: None,
             mod_type: kind.to_ascii_lowercase(),
             deployment_keys: keys,
             files,
             packages: Vec::new(),
             verification: "passed".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -2675,6 +3130,13 @@ mod update_tests {
             }],
         );
         let runtime = component("UE4SS", vec!["ZCOMSquadSix".into()], Vec::new());
+        assert!(super::validate_bundle_origin(&[core.clone(), runtime.clone()]).is_ok());
+        let mut reused_archive_name = runtime.clone();
+        reused_archive_name.staging_root = PathBuf::from("/another-inspection");
+        assert!(super::validate_bundle_origin(&[core.clone(), reused_archive_name]).is_err());
+        let mut unrelated_archive = runtime.clone();
+        unrelated_archive.source_archive = "unrelated-armor.zip".into();
+        assert!(super::validate_bundle_origin(&[core.clone(), unrelated_archive]).is_err());
 
         assert_eq!(
             replaced_by(&connection, &core).unwrap().unwrap().mod_id,
@@ -2684,5 +3146,9 @@ mod update_tests {
             replaced_by(&connection, &runtime).unwrap().unwrap().mod_id,
             "old-runtime"
         );
+        database::remove_mod(&connection, "old-core").unwrap();
+        database::remove_mod(&connection, "old-runtime").unwrap();
+        assert!(replaced_by(&connection, &core).unwrap().is_none());
+        assert!(replaced_by(&connection, &runtime).unwrap().is_none());
     }
 }

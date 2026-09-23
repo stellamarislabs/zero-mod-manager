@@ -3,8 +3,10 @@ pub(crate) mod naming;
 use crate::{
     archives,
     error::{AppError, Result},
-    models::{ManifestGame, ModManifest, ModPreview, PayloadFile, StagedMod, ToolInfo},
-    retoc, ue4ss,
+    models::{
+        ManifestGame, ModManifest, ModPreview, PackageAssessment, PayloadFile, StagedMod, ToolInfo,
+    },
+    ue4ss,
 };
 use naming::display_name;
 use std::{
@@ -18,16 +20,120 @@ use walkdir::WalkDir;
 /// Loader shims a game-folder mod such as ReShade ships. The file replaces a
 /// system library next to the executable, so it belongs in `Binaries/Win64`
 /// rather than in the mod folders.
-const INJECTOR_NAMES: [&str; 8] = [
+const INJECTOR_NAMES: [&str; 15] = [
     "dxgi.dll",
     "d3d9.dll",
     "d3d11.dll",
     "d3d12.dll",
     "opengl32.dll",
     "dinput8.dll",
+    "dsound.dll",
+    "winhttp.dll",
+    "xinput1_1.dll",
+    "xinput1_2.dll",
+    "xinput1_3.dll",
+    "xinput1_4.dll",
+    "xinput9_1_0.dll",
     "winmm.dll",
     "version.dll",
 ];
+
+/// Classifies packages that must never be mined for nested sample mods. Mod
+/// authoring tools and self-installing downloads often contain valid PAK
+/// examples, but treating those examples as the product is misleading.
+pub fn assess_package(executables: &[String]) -> PackageAssessment {
+    let mut native_files = executables.to_vec();
+    native_files.sort();
+    native_files.dedup();
+    native_files.truncate(200);
+
+    let executable = executables.iter().find(|path| {
+        matches!(
+            Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("exe" | "msi")
+        )
+    });
+    let script = executables.iter().find(|path| {
+        matches!(
+            Path::new(path)
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref(),
+            Some("bat" | "cmd" | "ps1" | "sh" | "vbs")
+        )
+    });
+
+    if let Some(path) = executable {
+        let lower = file_name(Path::new(path)).to_ascii_lowercase();
+        let installer = ["setup", "install", "patcher", "update"]
+            .iter()
+            .any(|word| lower.contains(word));
+        return PackageAssessment {
+            role: if installer {
+                "externalInstaller"
+            } else {
+                "externalTool"
+            }
+            .into(),
+            title: if installer {
+                "External installer"
+            } else {
+                "External application"
+            }
+            .into(),
+            reason: if installer {
+                "This download contains its own setup program. Zero Mod Manager did not run it and will not infer installable mods from files bundled inside it."
+            } else {
+                "This download contains a standalone application. It is not a deployable game mod, even if it includes sample mod files."
+            }
+            .into(),
+            native_files,
+        };
+    }
+    if script.is_some() {
+        return PackageAssessment {
+            role: "externalInstaller".into(),
+            title: "Scripted external installer".into(),
+            reason: "This download contains an installation script. Zero Mod Manager never executes archive scripts automatically.".into(),
+            native_files,
+        };
+    }
+    PackageAssessment {
+        role: "unknown".into(),
+        title: "Package inspection".into(),
+        reason: "No package role has been established yet.".into(),
+        native_files,
+    }
+}
+
+pub fn resolved_assessment(
+    previews: &[ModPreview],
+    mut assessment: PackageAssessment,
+) -> PackageAssessment {
+    if previews
+        .iter()
+        .all(|preview| preview.mod_type == "ue4ss-runtime")
+    {
+        assessment.role = "runtime".into();
+        assessment.title = "Runtime package".into();
+        assessment.reason =
+            "This package installs the UE4SS runtime used by script and native mods.".into();
+    } else {
+        assessment.role = "modBundle".into();
+        assessment.title = "Mod bundle".into();
+        assessment.reason = format!(
+            "{} recognized component{} will be reviewed before deployment.",
+            previews.len(),
+            if previews.len() == 1 { "" } else { "s" }
+        );
+    }
+    assessment
+}
 
 /// Where a game-folder mod's files are anchored inside the installation.
 const GAME_CONTENT_ROOT: &str = "SWZeroCompany";
@@ -97,6 +203,30 @@ fn config_destination(path: &Path) -> Option<PathBuf> {
 /// The readable part of a source name. Only a known archive extension is
 /// stripped, because a mod folder is regularly named with dots in it and
 /// `file_stem` would cut the name at the first one.
+fn is_supplementary_file(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or("");
+    matches!(
+        name,
+        "readme"
+            | "readme.md"
+            | "readme.txt"
+            | "license"
+            | "license.md"
+            | "license.txt"
+            | "copying"
+            | "copying.txt"
+            | "changelog.md"
+            | "changelog.txt"
+            | "sha256sums"
+            | "sha256sums.txt"
+            | "checksums.sha256"
+    ) || (normalized
+        .split('/')
+        .any(|part| matches!(part, "licenses" | "licences"))
+        && (name.ends_with(".txt") || name.ends_with(".md")))
+}
+
 fn source_stem(source: &Path) -> String {
     let name = file_name(source);
     match lowercase_ext(source).as_str() {
@@ -114,23 +244,6 @@ fn rel(root: &Path, path: &Path) -> Result<PathBuf> {
         .strip_prefix(root)
         .map_err(|e| AppError::Other(e.to_string()))?
         .to_path_buf())
-}
-
-fn register_package_owners(
-    owners: &mut BTreeMap<String, String>,
-    stem: &str,
-    packages: &[String],
-) -> Result<()> {
-    for package in packages {
-        if let Some(previous) = owners.insert(package.clone(), stem.to_string()) {
-            if previous != stem {
-                return Err(AppError::AlternativeIoStoreVariants(format!(
-                    "{previous} and {stem}"
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 /// A UE4SS mod folder: the directory UE4SS itself loads by name.
@@ -353,7 +466,7 @@ pub fn scan_staged(
 fn collect(
     source: &Path,
     root: &Path,
-    tool: &ToolInfo,
+    _tool: &ToolInfo,
     game_build: Option<&str>,
     ue4ss_ready: bool,
     show_packages: bool,
@@ -397,6 +510,7 @@ fn collect(
             mod_type: "ue4ss-runtime".into(),
             files: listed,
             warnings: warnings.clone(),
+            supplementary_files: Vec::new(),
             valid: true,
             verification: "not-required".into(),
             verification_details: None,
@@ -420,12 +534,12 @@ fn collect(
             version: preview.version.clone(),
             author: None,
             description: preview.description.clone(),
+            manifest: None,
             mod_type: "ue4ss-runtime".into(),
             deployment_keys: Vec::new(),
             files: Vec::new(),
             packages: Vec::new(),
             verification: "not-required".into(),
-            verification_details: None,
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -447,7 +561,7 @@ fn collect(
         })
         .collect();
     for (_, manifest) in &manifests {
-        if manifest.schema_version != 1 {
+        if !matches!(manifest.schema_version, 1 | 2) {
             return Err(AppError::Other(format!(
                 "Unsupported zcom-mod.json schema version {}.",
                 manifest.schema_version
@@ -654,16 +768,11 @@ fn collect(
             let has_iostore = groups
                 .iter()
                 .any(|(_, group)| group.contains_key("utoc") || group.contains_key("ucas"));
-            let mut packages = Vec::new();
-            let mut package_paths = Vec::new();
-            let mut verification = if has_iostore {
-                "passed".to_string()
-            } else {
-                "not-required".to_string()
-            };
-            let mut details: Option<String> = None;
+            let packages = Vec::new();
+            let package_paths = Vec::new();
+            let verification = "not-required".to_string();
+            let details: Option<String> = None;
             let mut payload = Vec::new();
-            let mut package_owners: BTreeMap<String, String> = BTreeMap::new();
             for (stem, group) in groups.iter().filter(|(_, group)| {
                 !has_iostore || group.contains_key("utoc") || group.contains_key("ucas")
             }) {
@@ -688,30 +797,6 @@ fn collect(
                             destination_relative: name,
                         });
                         claimed.insert(path.clone());
-                    }
-                }
-                let Some(utoc) = group.get("utoc") else {
-                    continue;
-                };
-                match retoc::inspect(tool, utoc) {
-                    Ok(info) => {
-                        register_package_owners(&mut package_owners, stem, &info.package_ids)?;
-                        packages.extend(info.package_ids);
-                        package_paths.extend(info.package_paths);
-                        details = Some(match details {
-                            Some(previous) => format!("{previous}\n{}", info.details),
-                            None => info.details,
-                        })
-                    }
-                    Err(AppError::RetocNotFound) => {
-                        if verification != "failed" {
-                            verification = "unavailable".into();
-                        }
-                        details = Some(AppError::RetocNotFound.to_string())
-                    }
-                    Err(error) => {
-                        verification = "failed".into();
-                        details = Some(error.to_string())
                     }
                 }
             }
@@ -854,6 +939,9 @@ fn collect(
     if buckets.is_empty() {
         return Err(AppError::ModNotRecognized);
     }
+    let (supplementary_files, ignored): (Vec<String>, Vec<String>) = ignored
+        .into_iter()
+        .partition(|path| is_supplementary_file(path));
     if !ignored.is_empty() {
         warnings.push(format!(
             "{} file{} in this archive {} not part of a recognized mod layout and will not be \
@@ -939,7 +1027,7 @@ fn collect(
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("pak"))
             });
         let valid = match bucket.kind {
-            "iostore" => verification == "passed",
+            "iostore" => true,
             "ue4ss" => ue4ss_ready,
             _ => true,
         };
@@ -967,12 +1055,12 @@ fn collect(
                 .or_else(|| source_version.clone()),
             author: manifest.and_then(|m| m.author.clone()),
             description: manifest.and_then(|m| m.description.clone()),
+            manifest: manifest.cloned(),
             mod_type: bucket.kind.into(),
             deployment_keys: bucket.keys.clone(),
             files: bucket.files.clone(),
             packages: bucket_packages.clone(),
             verification: verification.clone(),
-            verification_details: details.clone(),
             fomod_source_root: None,
             fomod_answers: None,
         };
@@ -997,6 +1085,7 @@ fn collect(
                 })
                 .collect(),
             warnings: bucket_warnings,
+            supplementary_files: supplementary_files.clone(),
             valid,
             verification,
             verification_details: details,
@@ -1071,6 +1160,25 @@ mod tests {
         ToolInfo::default()
     }
 
+    #[test]
+    fn setup_programs_are_external_installers_not_mod_payloads() {
+        let assessment = assess_package(&[
+            "Aftermath_DLC_Setup.exe".into(),
+            "payload/SWZeroCompany/Content/Paks/~mods/example.pak".into(),
+        ]);
+        assert_eq!(assessment.role, "externalInstaller");
+        assert!(assessment.reason.contains("did not run"));
+    }
+
+    #[test]
+    fn authoring_applications_are_external_tools_even_with_sample_mods() {
+        let assessment = assess_package(&[
+            "ZeroCompanyModdingTool.exe".into(),
+            "BaseMods/Example.dll".into(),
+        ]);
+        assert_eq!(assessment.role, "externalTool");
+    }
+
     fn write(path: &Path, body: &[u8]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
@@ -1132,17 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_overlapping_iostore_variants() {
-        let mut owners = BTreeMap::new();
-        register_package_owners(&mut owners, "FullPrice", &["package-a".into()]).unwrap();
-        assert!(matches!(
-            register_package_owners(&mut owners, "HalfPrice", &["package-a".into()]),
-            Err(AppError::AlternativeIoStoreVariants(_))
-        ));
-    }
-
-    #[test]
-    fn detects_complete_iostore_triplet_and_requires_verifier() {
+    fn detects_complete_iostore_triplet_without_verifier() {
         let s = tempdir().unwrap();
         let c = tempdir().unwrap();
         for ext in ["pak", "utoc", "ucas"] {
@@ -1151,8 +1249,8 @@ mod tests {
         let (_, preview) = one(s.path(), c.path(), false);
         assert_eq!(preview.mod_type, "iostore");
         assert_eq!(preview.files.len(), 3);
-        assert_eq!(preview.verification, "unavailable");
-        assert!(!preview.valid);
+        assert_eq!(preview.verification, "not-required");
+        assert!(preview.valid);
         assert!(preview.load_order_supported);
     }
 
@@ -1403,11 +1501,9 @@ mod tests {
             !warnings.iter().any(|w| w.contains("zcom-mod.json")),
             "the manager read that manifest: {warnings:?}"
         );
-        // A file it genuinely did not recognise is still reported.
-        assert!(
-            warnings.iter().any(|w| w.contains("readme.txt")),
-            "{warnings:?}"
-        );
+        // Documentation is available as neutral detail, not a warning.
+        assert!(!warnings.iter().any(|w| w.contains("readme.txt")));
+        assert_eq!(found[0].1.supplementary_files, vec!["readme.txt"]);
     }
 
     #[test]
@@ -1595,10 +1691,7 @@ mod tests {
         let Some(folder) = std::env::var_os("ZERO_MOD_MANAGER_ARCHIVES") else {
             panic!("set ZERO_MOD_MANAGER_ARCHIVES to a folder of downloaded mod archives")
         };
-        let integration_tool = std::env::var("ZERO_MOD_MANAGER_RETOC")
-            .ok()
-            .map(|path| crate::retoc::find(Some(&path)))
-            .unwrap_or_else(tool);
+        let integration_tool = tool();
         let cache = tempdir().unwrap();
         let mut seen = 0;
         let mut failures = Vec::new();
@@ -1674,11 +1767,19 @@ mod tests {
         let c = tempdir().unwrap();
         write(&s.path().join("MyMod/Scripts/main.lua"), b"return {}");
         write(&s.path().join("README.txt"), b"read me");
+        write(&s.path().join("SHA256SUMS.txt"), b"checksum");
+        write(&s.path().join("licenses/MinHook.txt"), b"license");
+        write(&s.path().join("unknown.bin"), b"payload");
         let (_, preview) = one(s.path(), c.path(), true);
-        assert!(preview
+        assert_eq!(preview.supplementary_files.len(), 3);
+        assert!(!preview
             .warnings
             .iter()
             .any(|warning| warning.contains("README.txt")));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unknown.bin")));
     }
 
     /// The whole scripted path, from an archive on disk to the mod a person

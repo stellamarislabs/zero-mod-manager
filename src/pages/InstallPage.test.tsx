@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { FomodSession, ModPreview, PreviewType } from "../types";
 import { InstallPage } from "./InstallPage";
@@ -18,7 +18,7 @@ const preview = (stagingId: string, name: string, modType: PreviewType = "ue4ss"
 
 function props(overrides: Partial<Parameters<typeof InstallPage>[0]> = {}): Parameters<typeof InstallPage>[0] {
   return {
-    previews: [], names: {}, loading: false, download: null, advanced: false, installing: null,
+    previews: [], packageAssessment: null, names: {}, loading: false, advanced: false, installing: null,
     installer: null, installerRestored: null, installerCanGoBack: false,
     onInstallerNext: vi.fn(), onInstallerBack: vi.fn(),
     onAdvanced: vi.fn(), onName: vi.fn(), onChooseFile: vi.fn(), onChooseFolder: vi.fn(),
@@ -27,20 +27,90 @@ function props(overrides: Partial<Parameters<typeof InstallPage>[0]> = {}): Para
 }
 
 describe("install preview", () => {
+  it("does not claim a known in-game conflict winner from planned order", () => {
+    render(<InstallPage {...props({ previews: [{
+      ...preview("io", "Armor", "iostore"), loadOrderSupported: true,
+      conflicts: [{ modId: "other", name: "Other armor", packageCount: 2 }]
+    }] })} />);
+    expect(screen.getByText("Overlaps 1 installed mod entry")).toBeTruthy();
+    expect(screen.getByText(/Actual in-game behavior still needs testing/)).toBeTruthy();
+    expect(screen.queryByText(/win these package conflicts/)).toBeNull();
+  });
+  it("does not let an invalid runtime package be installed", () => {
+    render(<InstallPage {...props({ previews: [{ ...preview("runtime", "Broken runtime", "ue4ss-runtime"), valid: false }] })} />);
+    expect((screen.getByRole("button", { name: "Install UE4SS runtime" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("keeps harmless supplementary files in details while exposing native-code risks", () => {
+    const candidate = {...preview("dll","Helmet"), supplementaryFiles:["README.md","SHA256SUMS.txt","licenses/MinHook.txt"], warnings:["Native DLL runs inside the game."]};
+    const {rerender} = render(<InstallPage {...props({previews:[candidate]})} />);
+    expect(screen.queryByText("README.md")).toBeNull();
+    expect(screen.queryByText("Packages modified")).toBeNull();
+    expect(screen.getByText("Native DLL runs inside the game.")).toBeTruthy();
+    rerender(<InstallPage {...props({previews:[candidate],advanced:true})} />);
+    expect(screen.getByText("README.md")).toBeTruthy();
+    expect(screen.getByText("licenses/MinHook.txt")).toBeTruthy();
+  });
+  it("keeps compatibility problems visible when details are collapsed", () => {
+    render(<InstallPage {...props({previews:[{...preview("bad","Wrong build"),compatibility:"warning",compatibilityMessage:"This game build is not supported."}]})} />);
+    expect(screen.getByRole("alert").textContent).toContain("This game build is not supported.");
+  });
+  it("does not prompt for retired container verification", () => {
+    render(<InstallPage {...props({ previews: [{ ...preview("io", "Containers", "iostore"), verification: "unavailable" }] })} />);
+    const button = screen.getByRole("button", { name: "Install" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it("does not enable installation after failed verification", () => {
+    render(<InstallPage {...props({ previews: [{ ...preview("io", "Broken", "iostore"), verification: "failed", valid: false }] })} />);
+    expect((screen.getByRole("button", { name: "Install" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("offers every mod an archive contains", () => {
     render(<InstallPage {...props({ previews: [preview("a", "ShadowsCore"), preview("b", "ShadowsTweaks")] })} />);
-    expect(screen.getByText("2 components found in this download")).toBeDefined();
+    expect(screen.getByText("2 entries found in this package")).toBeDefined();
     const fields = screen.getAllByLabelText("Mod name") as HTMLInputElement[];
     expect(fields.map(field => field.value)).toEqual(["ShadowsCore", "ShadowsTweaks"]);
     expect(screen.getAllByRole("button", { name: "Install" })).toHaveLength(2);
   });
 
-  it("offers one action for every required component in a bundle", async () => {
+  it("requires review before treating package entries as one bundle", async () => {
     const onInstallAll = vi.fn();
     const mods = [preview("a", "Squad Six - Runtime"), preview("b", "Squad Six - Core", "iostore")];
     render(<InstallPage {...props({ previews: mods, onInstallAll })} />);
-    await userEvent.click(screen.getByRole("button", { name: "Install all components" }));
+    await userEvent.click(screen.getByRole("button", { name: "Install as one bundle" }));
+    expect(onInstallAll).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", { name: "Install these entries as one bundle?" });
+    expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(within(dialog).getByText("Squad Six - Runtime")).toBeTruthy();
+    expect(within(dialog).getByText("Squad Six - Core")).toBeTruthy();
+    expect(within(dialog).getByText(/only when all entries belong to the same mod/)).toBeTruthy();
+    expect(within(dialog).getByText(/For independent mods, cancel/)).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Install bundle" }));
     expect(onInstallAll).toHaveBeenCalledWith(mods);
+  });
+
+  it("lets unrelated mods remain separate after cancelling bundle review", async () => {
+    const onInstallAll = vi.fn();
+    const onInstall = vi.fn();
+    const mods = [preview("armor-a", "Scout armor"), preview("armor-b", "Heavy armor")];
+    render(<InstallPage {...props({ previews: mods, names: { "armor-b": "Renamed heavy armor" }, onInstallAll, onInstall })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Install as one bundle" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Renamed heavy armor")).toBeTruthy();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onInstallAll).not.toHaveBeenCalled();
+    await userEvent.click(screen.getAllByRole("button", { name: "Install" })[1]);
+    expect(onInstall).toHaveBeenCalledWith(mods[1]);
+    expect(onInstallAll).not.toHaveBeenCalled();
+  });
+
+  it("dismisses bundle review if the inspected package changes", async () => {
+    const onInstallAll = vi.fn();
+    const { rerender } = render(<InstallPage {...props({ previews: [preview("a", "Core"), preview("b", "Runtime")], onInstallAll })} />);
+    await userEvent.click(screen.getByRole("button", { name: "Install as one bundle" }));
+    rerender(<InstallPage {...props({ previews: [preview("c", "Other core"), preview("d", "Other runtime")], onInstallAll })} />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onInstallAll).not.toHaveBeenCalled();
   });
 
   it("labels mutually selectable packaged folders clearly", () => {
@@ -79,9 +149,33 @@ describe("install preview", () => {
     render(<InstallPage {...props()} />);
     expect(screen.getByText(/UE4SS Lua or DLL mod/)).toBeDefined();
   });
+
+  it("blocks an external installer without offering a mod install action", () => {
+    render(<InstallPage {...props({ packageAssessment: {
+      role: "externalInstaller",
+      title: "External installer",
+      reason: "This download contains its own setup program.",
+      nativeFiles: ["Aftermath_DLC_Setup.exe"]
+    } })} />);
+    expect(screen.getByText("NOT A MANAGED MOD")).toBeDefined();
+    expect(screen.getByText("Aftermath_DLC_Setup.exe")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  });
 });
 
 describe("upgrades", () => {
+  it("blocks cancellation while deployment owns the staged files", () => {
+    render(<InstallPage {...props({ previews: [preview("a", "Armor")], installing: "a" })} />);
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("does not offer a doomed bundle action for unrelated installed entries", () => {
+    render(<InstallPage {...props({ previews: [
+      { ...preview("a", "Armor"), replaces: { modId: "old", name: "Armor", version: "1", reason: "Same folder" } },
+      preview("b", "Different armor")
+    ] })} />);
+    expect(screen.queryByRole("button", { name: "Update complete mod" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Install as one bundle" })).toBeNull();
+  });
   it("offers to replace the installed version instead of reporting a conflict", async () => {
     const onInstall = vi.fn();
     const upgrade: ModPreview = {
@@ -92,9 +186,11 @@ describe("upgrades", () => {
     expect(screen.getByText("Replaces ZC Unlocked 1.2")).toBeDefined();
     await userEvent.click(screen.getByRole("button", { name: "Replace installed version" }));
     expect(onInstall).toHaveBeenCalledWith(upgrade);
+    expect(screen.queryByRole("button", { name: "Update complete mod" })).toBeNull();
   });
 
-  it("offers to update every component when a bundle matches old installs", () => {
+  it("offers complete package update with replacement disclosure without a second bundle confirmation", async () => {
+    const onInstallAll = vi.fn();
     const core = {
       ...preview("core", "Squad Six - Core", "iostore"),
       replaces: { modId: "old-core", name: "Squad Six - Core", version: "1.0.1", reason: "It ships the same container files." }
@@ -103,8 +199,14 @@ describe("upgrades", () => {
       ...preview("runtime", "Squad Six - Runtime"),
       replaces: { modId: "old-runtime", name: "Squad Six - Runtime", version: "1.0.1", reason: "It uses the same UE4SS mod folder." }
     };
-    render(<InstallPage {...props({ previews: [core, runtime] })} />);
-    expect(screen.getByRole("button", { name: "Update all components" })).toBeDefined();
+    render(<InstallPage {...props({ previews: [core, runtime], automaticPackageTarget: "bundle-1", onInstallAll })} />);
+    expect(screen.queryByRole("button", { name: /all components/i })).toBeNull();
+    expect(screen.getByRole("button", { name: "Update complete mod" })).toBeDefined();
+    expect(screen.getByText(/replaces the complete existing package/i)).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "Replace installed version" })).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Update complete mod" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onInstallAll).toHaveBeenCalledWith([core, runtime]);
   });
 });
 

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ExistingModCandidate, ExistingModScan } from "../types";
-import { AdoptionDialog, initialAdoptionGroups, mergeSelectedGroups, splitAdoptionGroup } from "./AdoptionDialog";
+import { AdoptionDialog, initialAdoptionGroups } from "./AdoptionDialog";
 
 afterEach(cleanup);
 
@@ -30,21 +30,21 @@ function scan(candidates: ExistingModCandidate[]): ExistingModScan {
   return { scanId: "scan", candidates, unsupported: [], warnings: [] };
 }
 
-describe("adoption grouping", () => {
-  it("merges selected packaged candidates and splits them without changing names", () => {
-    const candidates = [candidate("alpha"), candidate("bravo", "iostore")];
-    const initial = initialAdoptionGroups(candidates);
-    const merged = mergeSelectedGroups(initial, candidates);
-    expect(merged).toEqual([{ candidateIds: ["alpha", "bravo"], name: "Alpha", selected: true }]);
-    expect(splitAdoptionGroup(merged, 0, candidates)).toEqual([
-      { candidateIds: ["alpha"], name: "Alpha", selected: true },
-      { candidateIds: ["bravo"], name: "Bravo", selected: true }
-    ]);
+describe("adoption identity", () => {
+  it("keeps five unrelated armor mods separate even when every checkbox is selected", async () => {
+    const candidates = ["clone", "rebel", "mandalorian", "stormtrooper", "scout"].map(id => candidate(id));
+    expect(initialAdoptionGroups(candidates).map(group => group.candidateIds)).toEqual(candidates.map(item => [item.id]));
+    const onAdopt = vi.fn().mockResolvedValue({ outcomes: [] });
+    render(<AdoptionDialog scan={scan(candidates)} busy={false} onClose={vi.fn()} onAdopt={onAdopt} />);
+    expect(screen.queryByRole("button", { name: /merge|group as one mod/i })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Adopt 5 selected" }));
+    expect(onAdopt).toHaveBeenCalledWith(candidates.map(item => ({ candidateIds: [item.id], name: item.name })));
   });
 
-  it("does not merge UE4SS candidates with packaged candidates", () => {
-    const candidates = [candidate("alpha"), candidate("script", "ue4ss")];
-    expect(mergeSelectedGroups(initialAdoptionGroups(candidates), candidates)).toHaveLength(2);
+  it("does not infer a relationship from similar names or mixed mod types", () => {
+    const candidates = [candidate("paint"), candidate("paint-ui", "ue4ss"), candidate("paint-plugin", "plugin")];
+    expect(initialAdoptionGroups(candidates)).toHaveLength(3);
+    expect(initialAdoptionGroups(candidates).every(group => group.candidateIds.length === 1)).toBe(true);
   });
 });
 

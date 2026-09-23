@@ -1,14 +1,14 @@
-import { Activity, CircleArrowUp, CircleHelp, Download, Home, Package, Settings } from "lucide-react";
+import { Activity, CircleArrowUp, CircleHelp, Download, Home, Layers3, Package, Settings } from "lucide-react";
 import brandMark from "../assets/icon.svg";
 
-export type Page = "home" | "mods" | "install" | "diagnostics" | "settings" | "about";
+export type Page = "home" | "mods" | "install" | "profiles" | "diagnostics" | "settings" | "about";
 const nav: Array<[Page, string, typeof Home]> = [
-  ["home", "Home", Home], ["mods", "Mods", Package], ["install", "Install", Download],
-  ["diagnostics", "Diagnostics", Activity], ["settings", "Settings", Settings],
+  ["home", "Command Center", Home], ["mods", "Library", Package], ["install", "Install", Download],
+  ["profiles", "Profiles", Layers3], ["diagnostics", "Health", Activity], ["settings", "Settings", Settings],
   ["about", "About", CircleHelp]
 ];
 
-export function Shell({ page, onPage, gameReady, updateAvailable, children }: { page: Page; onPage: (page: Page) => void; gameReady: boolean; updateAvailable: boolean; children: React.ReactNode }) {
+export function Shell({ page, onPage, gameReady, updateAvailable, toolbar, children }: { page: Page; onPage: (page: Page) => void; gameReady: boolean; updateAvailable: boolean; toolbar?: React.ReactNode; children: React.ReactNode }) {
   return <div className="shell">
     <aside className="sidebar">
       <button className="brand" onClick={() => onPage("home")} aria-label="Zero Mod Manager home">
@@ -17,9 +17,12 @@ export function Shell({ page, onPage, gameReady, updateAvailable, children }: { 
       <nav aria-label="Primary navigation">
         {nav.map(([id, label, Icon]) => <button key={id} className={page === id ? "active" : ""} aria-current={page === id ? "page" : undefined} onClick={() => onPage(id)}><Icon aria-hidden size={19} />{label}{id === "about" && updateAvailable && <CircleArrowUp className="nav-update" aria-label="Update available" size={16} />}</button>)}
       </nav>
-      <div className="sidebar-status"><span className={gameReady ? "pulse good" : "pulse"} /> <span>{gameReady ? "Game connected" : "Game not found"}</span></div>
+      <div className="sidebar-status"><span className={gameReady ? "pulse good" : "pulse"} /> <span>{gameReady ? "Game found" : "Game not found"}</span></div>
       <div className="version">v{__APP_VERSION__}</div>
     </aside>
-    <main className="main">{children}</main>
+    <div className="workspace">
+      {toolbar && <header className="app-toolbar">{toolbar}</header>}
+      <main className="main">{children}</main>
+    </div>
   </div>;
 }

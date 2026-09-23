@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://zcom-modding.github.io/zcom-mod.schema.json",
-  "title": "ZCOM Mod Manifest",
+  "$id": "https://zero-mod-manager.github.io/schema/mod-manifest-v2.json",
+  "title": "Zero Mod Manager Manifest",
   "type": "object",
   "additionalProperties": true,
   "required": ["schemaVersion", "id", "name", "type"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "enum": [1, 2] },
     "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$" },
     "name": { "type": "string", "minLength": 1 },
     "version": { "type": "string" },
@@ -21,7 +21,44 @@
         "strict": { "type": "boolean", "default": false }
       }
     },
-    "type": { "type": "array", "items": { "enum": ["iostore", "pak", "ue4ss", "gamedir"] }, "minItems": 1, "uniqueItems": true },
+    "type": { "type": "array", "items": { "enum": ["iostore", "pak", "ue4ss", "gamedir", "plugin", "config"] }, "minItems": 1, "uniqueItems": true },
+    "nexus": {
+      "type": "object",
+      "properties": {
+        "modId": { "type": "integer", "minimum": 1 },
+        "fileId": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "platforms": { "type": "array", "items": { "enum": ["windows", "linux", "proton", "steam-deck"] }, "uniqueItems": true },
+    "launchers": { "type": "array", "items": { "enum": ["steam", "ea", "manual"] }, "uniqueItems": true },
+    "runtime": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string" },
+        "required": { "type": "boolean", "default": true }
+      }
+    },
+    "dependencies": { "$ref": "#/$defs/relations" },
+    "incompatibilities": { "$ref": "#/$defs/relations" },
+    "loadAfter": { "$ref": "#/$defs/relations" },
+    "configSchema": { "type": "object" },
     "requires": { "type": "object", "properties": { "ue4ss": { "type": "boolean" } } }
+  },
+  "$defs": {
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "version": { "type": "string" },
+          "reason": { "type": "string" },
+          "evidenceUrl": { "type": "string", "format": "uri" }
+        }
+      }
+    }
   }
 }

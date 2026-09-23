@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zeromodmanager.example/schema/compatibility-catalog-v1.json",
+  "title": "Zero Mod Manager Compatibility Catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "version", "issuedAt", "expiresAt", "rules"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "issuedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "subjectModId", "ruleType", "severity", "message"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "subjectModId": { "type": "string", "minLength": 1 },
+          "targetModId": { "type": ["string", "null"] },
+          "ruleType": { "enum": ["requires", "incompatible", "load-after", "known-issue"] },
+          "severity": { "enum": ["blocked", "warning", "unverified", "info"] },
+          "message": { "type": "string", "minLength": 1 },
+          "evidenceUrl": { "type": ["string", "null"], "format": "uri" }
+        }
+      }
+    }
+  }
+}

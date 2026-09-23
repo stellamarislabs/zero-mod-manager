@@ -10,9 +10,13 @@ Star Wars: Zero Company players who install packaged, Unreal plugin, UE4SS, and 
 
 ## Product Purpose
 
-Zero Mod Manager is the maintained community continuation of ZCOM Mod Manager 0.6.5. It keeps the original task-focused workflow while fixing current startup, Linux, plugin, configuration, Nexus, and diagnostics failures. Success means users can inspect, install, update, disable, repair, and remove supported mods without unexplained writes or data loss.
+Zero Mod Manager is the maintained community continuation of ZCOM Mod Manager 0.6.5. It keeps the original task-focused workflow while fixing current startup, Linux, plugin, configuration and diagnostics failures. Success means users can inspect, install, update, disable, repair, and remove supported mods without unexplained writes or data loss.
 
 ## Brand Personality
+
+### Unified application direction, 2026-09-22 (supersedes holotable)
+
+The user explicitly retired the holographic Command Center concept after reviewing its implementation. All pages now follow the existing restrained application theme, with shared colors, typography, borders and buttons. The sidebar and launch toolbar belong to the persistent Shell and must not move or resize on page navigation. Command Center preserves its evidence, system selection and operational actions through a simple list and detail layout, without a hologram, projection effects or a home-only masthead.
 
 Tactical, trustworthy, restrained. The interface should feel like a calm operations console: precise about risk, explicit about state, and quiet when no action is required.
 
@@ -30,7 +34,7 @@ Tactical, trustworthy, restrained. The interface should feel like a calm operati
 2. Make state actionable: every invalid path, failed check, conflict, or unsupported package names the cause and next safe action.
 3. Earn trust through reversibility: preview writes, track ownership, back up replacements, and expose rollback outcomes.
 4. Keep advanced detail available without forcing it into the primary workflow.
-5. Distinguish verified health from assumptions, especially for Linux/Proton, Nexus, and experimental EA App support.
+5. Distinguish verified health from assumptions, especially for Linux/Proton and experimental EA App support.
 
 ## Accessibility & Inclusion
 

@@ -13,15 +13,15 @@ describe("legacy import consent", () => {
 
     expect(screen.getByText(/4 managed mods and 19 library files/)).toBeTruthy();
     await userEvent.click(screen.getByRole("button", { name: "Import library" }));
-    expect(onImport).toHaveBeenCalledWith(false);
+    expect(onImport).toHaveBeenCalledWith();
   });
 
-  it("copies the Nexus key only after explicit opt-in", async () => {
+  it("never offers to import retired API credentials", async () => {
     const onImport = vi.fn();
     render(<LegacyImportDialog status={{ available: true, canImport: true, dataDirectory: "C:/old", libraryDirectory: "C:/old/mods", modCount: 1, fileCount: 2, reason: null }} busy={false} onImport={onImport} onClose={vi.fn()} />);
 
-    await userEvent.click(screen.getByRole("checkbox", { name: /also import my Nexus API key/i }));
+    expect(screen.queryByRole("checkbox", { name: /Nexus API key/i })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Import library" }));
-    expect(onImport).toHaveBeenCalledWith(true);
+    expect(onImport).toHaveBeenCalledWith();
   });
 });

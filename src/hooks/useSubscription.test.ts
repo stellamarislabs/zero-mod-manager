@@ -4,6 +4,15 @@ import { renderHook } from "@testing-library/react";
 import { useSubscription } from "./useSubscription";
 
 describe("useSubscription", () => {
+  it("handles registration failure without an unhandled rejection", async () => {
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { unmount } = renderHook(() => useSubscription(() => Promise.reject(new Error("unavailable")), []));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(report).toHaveBeenCalledOnce();
+    unmount();
+    report.mockRestore();
+  });
   it("unsubscribes a handle that arrives after cleanup", async () => {
     const unsubscribe = vi.fn();
     let resolve: (fn: () => void) => void = () => {};

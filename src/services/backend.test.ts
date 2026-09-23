@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError, isChangedFileError } from "./backend";
+import { changedManagedFile, friendlyError, isChangedFileError } from "./backend";
 
 describe("friendlyError", () => {
   it("passes a backend message through unchanged", () => {
@@ -26,6 +26,15 @@ describe("isChangedFileError", () => {
       "Some mods write their own settings or data files there while the game runs.";
     expect(isChangedFileError(message)).toBe(true);
     expect(isChangedFileError(new Error(message))).toBe(true);
+    expect(changedManagedFile(message)).toBe("D:\\Games\\SWZeroCompany\\Binaries\\Win64\\ue4ss\\Mods\\ConfigManager\\registry.txt");
+  });
+
+  it("recognises a real transaction rollback before offering an explicit overwrite", () => {
+    const path = "C:\\Games\\SWZeroCompany\\Binaries\\Win64\\ue4ss\\Mods\\HelmetHide\\dlls\\main.dll";
+    const message = `No package changes were kept. Previous files and library were restored. A managed file changed outside Zero Mod Manager: ${path}`;
+    expect(changedManagedFile(message)).toBe(path);
+    expect(isChangedFileError(message)).toBe(true);
+    expect(changedManagedFile(`Operation failed: A managed file changed outside Zero Mod Manager: ${path}. Recovery pending: disk error.`)).toBeNull();
   });
 
   it("leaves every other failure to the ordinary error path", () => {

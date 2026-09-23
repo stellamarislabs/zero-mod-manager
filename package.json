@@ -1,16 +1,18 @@
 {
   "name": "zero-mod-manager",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.0-rc.7",
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "icons:generate": "tauri icon src/assets/icon.svg --output src-tauri/icons && node scripts/pack-windows-icon.mjs",
+    "build:windows": "tauri build --bundles nsis",
+    "build:portable": "tauri build --no-bundle",
     "check:release-version": "node scripts/check-release-version.mjs",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
-    "prepare:retoc": "bash scripts/prepare-retoc.sh",
     "build:appimage": "NO_STRIP=1 tauri build --bundles appimage",
     "tauri": "tauri"
   },

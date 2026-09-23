@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible Zero Mod Manager problem
+title: '[Bug] '
+body:
+  - type: markdown
+    attributes:
+      value: 'Do not attach credentials, saves, copyrighted game files, or unreviewed logs. Preview and redact support bundles before sharing.'
+  - type: input
+    id: version
+    attributes:
+      label: Manager version and package
+      placeholder: 0.7.0-rc.1, portable or installer
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Windows/Linux version, launcher, game build, runtime version and affected mod versions. Do not include your username or personal directories.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include expected and actual results and whether the problem also occurs without mods.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Exact error message or reviewed, redacted support bundle. Do not upload a save.

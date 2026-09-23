@@ -23,9 +23,9 @@ pub fn run(
     conn: &Connection,
     game: &GameInfo,
     ue4ss: &Ue4ssInfo,
-    retoc: &ToolInfo,
+    _tool: &ToolInfo,
 ) -> Result<DiagnosticReport> {
-    let mods = database::list_mods(conn)?;
+    let (managed, enabled) = database::counts(conn)?;
     let conflicts = database::conflict_count(conn)?;
     let mut items = Vec::new();
     items.push(item(
@@ -38,14 +38,26 @@ pub fn run(
         },
         (!game.detected).then(|| "Locate the game folder in Settings.".into()),
     ));
-    items.push(item("Steam manifest",if game.steam_build_id.is_some(){"good"}else{"warning"},game.steam_build_id.as_deref().map(|id|format!("Build {id}")).unwrap_or_else(||"Build ID unavailable".into()),game.steam_build_id.is_none().then(||"Manual installations work, but build compatibility cannot be assessed without an app manifest.".into())));
+    items.push(item(
+        "Game build",
+        if game.steam_build_id.is_some() {
+            "good"
+        } else {
+            "unknown"
+        },
+        game.steam_build_id
+            .as_deref()
+            .map(|id| format!("Build {id}"))
+            .unwrap_or_else(|| "Build ID unavailable".into()),
+        None,
+    ));
     if game.detected && game.steam_build_id.is_none() {
         items.push(item(
             "EA App / manual installation",
-            "warning",
-            "Experimental support",
+            "unknown",
+            "In-game behavior not verified",
             Some(
-                "File deployment is supported, but launcher-specific UE4SS injection is not yet verified. Run the game once, then confirm that UE4SS.log appears before relying on runtime mods."
+                "File checks do not establish in-game compatibility. Test the installed mods in the game; an existing log alone does not verify the current session."
                     .into(),
             ),
         ));
@@ -59,8 +71,6 @@ pub fn run(
         "~mods folder",
         if mods_folder.as_ref().is_some_and(|p| p.is_dir()) {
             "good"
-        } else if game.detected {
-            "warning"
         } else {
             "unknown"
         },
@@ -74,34 +84,22 @@ pub fn run(
     items.push(item(
         "Installed mods",
         "good",
-        format!(
-            "{} managed, {} enabled",
-            mods.len(),
-            mods.iter().filter(|m| m.enabled).count()
-        ),
+        format!("{managed} managed, {enabled} enabled (including partially enabled bundles)"),
         None,
     ));
-    items.push(item("Package conflicts",if conflicts==0{"good"}else{"warning"},format!("{conflicts} overlapping file/package group(s)"),(conflicts>0).then(||"Open Mods to review the affected managers. Raw package names remain hidden by default.".into())));
-    items.push(item("retoc",if retoc.found{"good"}else{"warning"},retoc.version.clone().unwrap_or_else(||"Not configured".into()),(!retoc.found).then(||"Install retoc 0.1.5 or select its executable in Settings before installing IoStore mods.".into())));
-    // A complete layout is not a loaded runtime. Reporting "Healthy" from file
-    // presence alone told a user whose game never loaded UE4SS that nothing was
-    // wrong, so the verdict now waits for the log UE4SS writes when it runs.
+    items.push(item("Recorded file/package overlaps",if conflicts==0{"good"}else{"warning"},format!("{conflicts} overlapping file/package group(s)"),(conflicts>0).then(||"Open Library to review the affected mods. Raw package names remain hidden by default.".into())));
+    // File presence and a historical log do not prove a successful game session.
     items.push(item(
         "UE4SS",
-        if ue4ss.healthy && ue4ss.log_found && ue4ss.extra_loaders.is_empty() {
+        if ue4ss.healthy {
             "good"
         } else if ue4ss.installed {
             "warning"
         } else {
             "unknown"
         },
-        if ue4ss.healthy && ue4ss.log_found {
-            format!("Loaded at least once; {} UE4SS mod(s)", ue4ss.mod_count)
-        } else if ue4ss.healthy {
-            format!(
-                "Files complete, but no UE4SS log yet; {} UE4SS mod(s)",
-                ue4ss.mod_count
-            )
+        if ue4ss.healthy {
+            format!("Expected files present; {} payload folder(s) detected", ue4ss.mod_count)
         } else if ue4ss.installed {
             "Incomplete installation".into()
         } else {
@@ -110,7 +108,7 @@ pub fn run(
         ue4ss.message.clone().or_else(|| {
             (!ue4ss.installed).then(|| {
                 format!(
-                    "Only needed for UE4SS script and DLL mods. Get the tested Zero Company build from {}, then use Home to install it.",
+                    "Only needed for UE4SS script and DLL mods. Get the tested Zero Company build from {}, then use Command Center to install it.",
                     crate::ue4ss::DOWNLOAD_URL
                 )
             })
@@ -119,16 +117,12 @@ pub fn run(
     if ue4ss.installed {
         items.push(item(
             "UE4SS log",
-            if ue4ss.log_found { "good" } else { "warning" },
+            "unknown",
             ue4ss
                 .log_path
                 .clone()
-                .unwrap_or_else(|| "Not written yet".into()),
-            (!ue4ss.log_found).then(|| {
-                "UE4SS writes this the first time it loads. Its absence after starting the game \
-                 means the loader never ran."
-                    .into()
-            }),
+                .unwrap_or_else(|| "Not found at known paths".into()),
+            Some("File presence only; the log's contents, age and current-session success have not been verified.".into()),
         ));
         if let Some(present) = ue4ss.vc_runtime {
             // A warning rather than an error: this checks System32 only, and a
@@ -143,22 +137,20 @@ pub fn run(
                     "vcruntime140 not found in System32"
                 },
                 (!present).then(|| {
-                    "UE4SS links against the Visual C++ 2015-2022 x64 runtime. Without it Windows \
-                     cannot load the loader, and the game either hangs at start-up or runs with \
-                     no UE4SS. Install it from Microsoft."
+                    "Expected runtime files were not found in System32. A local runtime was not checked. \
+                     If UE4SS fails to load, install the x64 Visual C++ runtime from Microsoft."
                         .into()
                 }),
             ));
         }
         if !ue4ss.extra_loaders.is_empty() {
             items.push(item(
-                "Proxy DLLs beside the game",
-                "warning",
+                "Other proxy DLLs beside the game",
+                "unknown",
                 ue4ss.extra_loaders.join(", "),
                 Some(
-                    "UE4SS loads only as dwmapi.dll. A copy renamed to another proxy name lets \
-                     the game start while the runtime never loads. Remove the extra file unless \
-                     another tool needs it."
+                    "These files may belong to other tools. File names alone do not establish a conflict; \
+                     review their source before changing them."
                         .into(),
                 ),
             ));
@@ -195,7 +187,8 @@ pub fn run(
         "GOOD"
     }
     .to_string();
-    let mut text = format!("Zero Mod Manager — Mod Doctor\nOverall: {overall}\n\n");
+    let mut text =
+        format!("Zero Mod Manager — Mod Doctor\nOverall (local file checks): {overall}\n\n");
     for i in &items {
         text.push_str(&format!(
             "{:<30} {} — {}\n",
@@ -226,5 +219,40 @@ fn sanitize(text: &str) -> String {
         text.replace(&home.display().to_string(), "~")
     } else {
         text.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_file_checks_never_claim_session_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = database::open(&dir.path().join("state.sqlite3")).unwrap();
+        let game = GameInfo {
+            detected: true,
+            ..Default::default()
+        };
+        let runtime = Ue4ssInfo {
+            installed: true,
+            healthy: true,
+            log_found: true,
+            ..Default::default()
+        };
+        let report = run(&conn, &game, &runtime, &ToolInfo::default()).unwrap();
+        assert!(!report.text.contains("Loaded at least once"));
+        assert!(report
+            .items
+            .iter()
+            .any(|item| item.label == "UE4SS" && item.value.contains("Expected files present")));
+        assert!(report
+            .items
+            .iter()
+            .any(|item| item.label == "Game build" && item.status == "unknown"));
+        assert!(report
+            .items
+            .iter()
+            .any(|item| item.label == "UE4SS log" && item.status == "unknown"));
     }
 }

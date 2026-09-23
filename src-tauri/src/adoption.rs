@@ -7,7 +7,6 @@ use crate::{
         ModFile, ModManifest, ModSummary, ToolInfo,
     },
     mods::naming::display_name,
-    retoc,
 };
 use chrono::Utc;
 use rusqlite::Connection;
@@ -24,8 +23,18 @@ use walkdir::WalkDir;
 const PACKAGED_ROOT: &str = "SWZeroCompany/Content/Paks/~mods";
 const LOGIC_ROOT: &str = "SWZeroCompany/Content/Paks/LogicMods";
 const UE4SS_ROOT: &str = "SWZeroCompany/Binaries/Win64/ue4ss/Mods";
+const PLUGIN_ROOT: &str = "SWZeroCompany/Mods";
 const JOURNAL_NAME: &str = "adoption-operation.json";
-const RUNTIME_COMPONENTS: [&str; 2] = ["bpmodloadermod", "consolecommandsmod"];
+pub(crate) const RUNTIME_COMPONENTS: [&str; 8] = [
+    "bpmodloadermod",
+    "consolecommandsmod",
+    "consoleenablermod",
+    "cheatmanagerenablermod",
+    "keybinds",
+    "splitscreenmod",
+    "linetracemod",
+    "bpml_genericfunctions",
+];
 const INJECTOR_NAMES: [&str; 8] = [
     "dxgi.dll",
     "d3d9.dll",
@@ -150,6 +159,7 @@ fn candidate(spec: CandidateSpec<'_>) -> CandidateSnapshot {
         .collect();
     CandidateSnapshot {
         public: ExistingModCandidate {
+            container_verification: None,
             id,
             name: spec.name,
             version: spec.version,
@@ -192,7 +202,7 @@ fn logical_packaged_name(path: &Path) -> PathBuf {
 fn scan_packaged(
     conn: &Connection,
     game: &Path,
-    tool: &ToolInfo,
+    _tool: &ToolInfo,
     owned: &HashSet<String>,
 ) -> Result<Vec<CandidateSnapshot>> {
     let root = game.join(PACKAGED_ROOT);
@@ -233,7 +243,7 @@ fn scan_packaged(
             .collect::<BTreeSet<_>>();
         let duplicate_extensions = extensions.len() != paths.len();
         let iostore = extensions.contains("utoc") || extensions.contains("ucas");
-        let mut blocked = if owned_count > 0 {
+        let blocked = if owned_count > 0 {
             Some(
                 "Some files in this container family are already managed by Zero Mod Manager."
                     .into(),
@@ -250,19 +260,8 @@ fn scan_packaged(
         } else {
             None
         };
-        let mut packages = Vec::new();
+        let packages = Vec::new();
         let warnings = Vec::new();
-        if iostore && blocked.is_none() {
-            let utoc = paths
-                .iter()
-                .find(|(path, _)| lower_extension(path) == "utoc")
-                .map(|(path, _)| path.as_path())
-                .expect("complete IoStore candidate has a UTOC");
-            match retoc::inspect(tool, utoc) {
-                Ok(inspection) => packages = inspection.package_ids,
-                Err(error) => blocked = Some(error.to_string()),
-            }
-        }
         let mut snapshots = Vec::new();
         for (path, _) in &paths {
             snapshots.push(metadata_snapshot(path, logical_packaged_name(path))?);
@@ -406,10 +405,19 @@ fn scan_ue4ss(game: &Path, owned: &HashSet<String>) -> Result<Vec<CandidateSnaps
                     .into(),
             );
         }
-        let (enabled, priority) = order
+        let (listed_enabled, priority) = order
             .get(&key.to_ascii_lowercase())
             .copied()
             .unwrap_or((false, result.len() as i64 + 1));
+        // UE4SS's enabled.txt marker bypasses mods.txt, including an explicit 0.
+        let enabled = listed_enabled
+            || files.iter().any(|file| {
+                file.source.parent() == Some(folder.as_path())
+                    && file
+                        .source
+                        .file_name()
+                        .is_some_and(|n| n.eq_ignore_ascii_case("enabled.txt"))
+            });
         result.push(candidate(CandidateSpec {
             name: manifest
                 .as_ref()
@@ -457,6 +465,78 @@ fn scan_logic_mods(game: &Path, owned: &HashSet<String>) -> Result<Vec<Candidate
     Ok(result)
 }
 
+fn scan_plugins(game: &Path, owned: &HashSet<String>) -> Result<Vec<CandidateSnapshot>> {
+    let root = game.join(PLUGIN_ROOT);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let folder = entry.path();
+        let key = entry.file_name().to_string_lossy().to_string();
+        if !regular_files(&folder)
+            .iter()
+            .any(|(p, regular)| *regular && lower_extension(p) == "uplugin")
+        {
+            continue;
+        }
+        let mut files = Vec::new();
+        let mut unsafe_entry = false;
+        for item in WalkDir::new(&folder).follow_links(false) {
+            let Ok(item) = item else {
+                unsafe_entry = true;
+                continue;
+            };
+            if item.file_type().is_symlink() {
+                unsafe_entry = true;
+                continue;
+            }
+            if item.file_type().is_file() {
+                files.push(metadata_snapshot(
+                    item.path(),
+                    PathBuf::from(&key).join(
+                        item.path()
+                            .strip_prefix(&folder)
+                            .map_err(|e| AppError::Other(e.to_string()))?,
+                    ),
+                )?);
+            }
+        }
+        let owned_count = files
+            .iter()
+            .filter(|f| owned.contains(&normalized(&f.source)))
+            .count();
+        if files.is_empty() || owned_count == files.len() {
+            continue;
+        }
+        result.push(candidate(CandidateSpec {
+            name: display_name(&key),
+            version: None,
+            mod_type: "plugin",
+            files,
+            enabled: true,
+            packages: Vec::new(),
+            deployment_keys: vec![key],
+            warnings: Vec::new(),
+            blocked_reason: if unsafe_entry {
+                Some("This plugin folder contains a link or unreadable entry.".into())
+            } else if owned_count > 0 {
+                Some("Some files in this plugin folder are already managed.".into())
+            } else {
+                None
+            },
+            likely_runtime_component: false,
+            inferred_priority: None,
+        }));
+    }
+    result.sort_by(|a, b| a.public.name.cmp(&b.public.name));
+    Ok(result)
+}
+
 fn unsupported_replacements(game: &Path) -> Vec<String> {
     let win64 = game.join("SWZeroCompany/Binaries/Win64");
     let mut result = Vec::new();
@@ -486,6 +566,7 @@ pub fn discover(
     let mut candidates = scan_packaged(conn, game, tool, &owned)?;
     candidates.extend(scan_ue4ss(game, &owned)?);
     candidates.extend(scan_logic_mods(game, &owned)?);
+    candidates.extend(scan_plugins(game, &owned)?);
     let scan_id = Uuid::new_v4().to_string();
     let public = candidates.iter().map(|item| item.public.clone()).collect();
     let held = candidates
@@ -562,15 +643,17 @@ pub fn recover(conn: &Connection, data: &Path) -> Result<()> {
 }
 
 fn allowed_source(game: &Path, source: &Path) -> bool {
-    [PACKAGED_ROOT, LOGIC_ROOT, UE4SS_ROOT].iter().any(|root| {
-        let allowed = game.join(root);
-        let Ok(allowed) = allowed.canonicalize() else {
-            return false;
-        };
-        source
-            .canonicalize()
-            .is_ok_and(|path| path.starts_with(allowed))
-    })
+    [PACKAGED_ROOT, LOGIC_ROOT, UE4SS_ROOT, PLUGIN_ROOT]
+        .iter()
+        .any(|root| {
+            let allowed = game.join(root);
+            let Ok(allowed) = allowed.canonicalize() else {
+                return false;
+            };
+            source
+                .canonicalize()
+                .is_ok_and(|path| path.starts_with(allowed))
+        })
 }
 
 fn current_snapshot(file: &FileSnapshot) -> Result<()> {
@@ -600,7 +683,7 @@ fn validate_name(name: &str) -> Result<String> {
     Ok(name.into())
 }
 
-fn adopt_group(
+fn adopt_candidate(
     conn: &mut Connection,
     library: &Path,
     data: &Path,
@@ -684,6 +767,8 @@ fn adopt_group(
     let id = Uuid::new_v4().to_string();
     let temporary = library.join(format!(".adopting-{id}"));
     let final_path = library.join(&id);
+    crate::package_transaction::protect_tree(&temporary)?;
+    crate::package_transaction::protect_tree(&final_path)?;
     let journal = AdoptionJournal {
         id: id.clone(),
         temporary: temporary.clone(),
@@ -758,7 +843,10 @@ fn adopt_group(
         .flat_map(|item| item.deployment_keys.clone())
         .collect::<Vec<_>>();
     let summary = ModSummary {
+        container_verification: None,
         id: id.clone(),
+        bundle_id: None,
+        bundle_name: None,
         name,
         version: candidates
             .iter()
@@ -804,6 +892,30 @@ fn adopt_group(
     }
     clear_journal(data);
     Ok(summary)
+}
+
+// A scan proves container/folder ownership, not common mod authorship.
+// Never turn a user's multiple adoption selections into a bundle.
+fn adopt_group(
+    conn: &mut Connection,
+    library: &Path,
+    data: &Path,
+    scan: &ScanSnapshot,
+    group: &AdoptionGroup,
+    build: Option<String>,
+) -> Result<ModSummary> {
+    if group.candidate_ids.len() != 1 {
+        return Err(AppError::Other(
+            "Scanned mods must be adopted separately. Select them together to adopt, not to merge. Install the original archive to preserve a bundle.".into(),
+        ));
+    }
+    validate_name(&group.name)?;
+    crate::package_transaction::run(conn, data, library, &scan.game, |writer| {
+        crate::package_transaction::protect_file(&data.join(JOURNAL_NAME))?;
+        let summary = adopt_candidate(writer, library, data, scan, group, build)?;
+        crate::profiles::capture_active(writer)?;
+        Ok(summary)
+    })
 }
 
 pub fn adopt(
@@ -860,7 +972,10 @@ mod tests {
     fn record_owned(conn: &mut Connection, path: &Path) {
         let hash = sha256(path).unwrap();
         let summary = ModSummary {
+            container_verification: None,
             id: Uuid::new_v4().to_string(),
+            bundle_id: None,
+            bundle_name: None,
             name: "Owned".into(),
             version: None,
             mod_type: "pak".into(),
@@ -971,6 +1086,7 @@ mod tests {
             .candidates
             .iter()
             .map(|item| AdoptionGroup {
+                allow_unverified: false,
                 candidate_ids: vec![item.id.clone()],
                 name: item.name.clone(),
             })
@@ -1023,17 +1139,22 @@ mod tests {
     }
 
     #[test]
-    fn merges_packaged_families_into_one_library_entry() {
+    fn five_selected_armor_mods_stay_separate_and_multi_candidate_merge_is_rejected() {
         let root = tempdir().unwrap();
         let game = root.path().join("game");
         let data = root.path().join("data");
         let library = data.join("mods");
         fs::create_dir_all(&library).unwrap();
-        write(&game.join(PACKAGED_ROOT).join("One_P.pak"), b"one");
-        write(&game.join(PACKAGED_ROOT).join("Two_P.pak"), b"two");
+        for name in ["Clone", "Rebel", "Mandalorian", "Stormtrooper", "Scout"] {
+            write(
+                &game.join(PACKAGED_ROOT).join(format!("{name}_P.pak")),
+                name.as_bytes(),
+            );
+        }
         let mut conn = database::open(&data.join("db")).unwrap();
         let (public, held) = discover(&conn, &game, &ToolInfo::default()).unwrap();
-        let report = adopt(
+        assert_eq!(public.candidates.len(), 5);
+        let merged = adopt(
             &mut conn,
             &library,
             &data,
@@ -1044,18 +1165,38 @@ mod tests {
                     .iter()
                     .map(|item| item.id.clone())
                     .collect(),
-                name: "Together".into(),
+                name: "Armor".into(),
+                allow_unverified: false,
             }],
             None,
         );
-        assert!(report.outcomes[0].error.is_none());
+        assert!(merged.outcomes[0]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("adopted separately"));
+        assert_eq!(database::counts(&conn).unwrap(), (0, 0));
+        let groups: Vec<_> = public
+            .candidates
+            .iter()
+            .map(|item| AdoptionGroup {
+                candidate_ids: vec![item.id.clone()],
+                name: item.name.clone(),
+                allow_unverified: false,
+            })
+            .collect();
+        let report = adopt(&mut conn, &library, &data, &held, &groups, None);
+        assert!(report.outcomes.iter().all(|item| item.error.is_none()));
         let mods = database::list_mods(&conn).unwrap();
-        assert_eq!(mods.len(), 1);
-        assert_eq!(mods[0].files.len(), 2);
-        assert_eq!(
-            fs::read(game.join(PACKAGED_ROOT).join("One_P.pak")).unwrap(),
-            b"one"
-        );
+        assert_eq!(mods.len(), 5);
+        assert!(mods.iter().all(|item| item.bundle_id.is_none()
+            && item.bundle_name.is_none()
+            && item.files.len() == 1));
+        assert_eq!(database::counts(&conn).unwrap(), (5, 5));
+        for item in mods {
+            let file = &item.files[0];
+            assert_eq!(sha256(Path::new(&file.destination)).unwrap(), file.sha256);
+        }
     }
 
     #[test]
@@ -1078,6 +1219,7 @@ mod tests {
             &data,
             &held,
             &[AdoptionGroup {
+                allow_unverified: false,
                 candidate_ids: vec![public.candidates[0].id.clone()],
                 name: "Quiet".into(),
             }],
@@ -1097,6 +1239,227 @@ mod tests {
         deployment::uninstall(&conn, &library, &adopted.id, false, Some(&game)).unwrap();
         assert!(!lua.exists());
         assert_eq!(database::counts(&conn).unwrap().0, 0);
+    }
+
+    #[test]
+    fn hybrid_adoption_preserves_types_names_state_and_files() {
+        let root = tempdir().unwrap();
+        let game = root.path().join("game");
+        let data = root.path().join("data");
+        let library = data.join("mods");
+        fs::create_dir_all(&library).unwrap();
+        write(&game.join(PACKAGED_ROOT).join("Paint_P.pak"), b"pak");
+        write(
+            &game.join(UE4SS_ROOT).join("Paint/Scripts/main.lua"),
+            b"lua",
+        );
+        write(&game.join(UE4SS_ROOT).join("Paint/enabled.txt"), b"");
+        write(&game.join(UE4SS_ROOT).join("mods.txt"), b"Paint : 0\n");
+        write(
+            &game.join(PLUGIN_ROOT).join("PaintUI/PaintUI.uplugin"),
+            b"{}",
+        );
+        write(
+            &game.join(PLUGIN_ROOT).join("PaintUI/Content/Paks/UI.utoc"),
+            b"toc",
+        );
+        let mut conn = database::open(&data.join("db")).unwrap();
+        let (public, held) = discover(&conn, &game, &ToolInfo::default()).unwrap();
+        assert_eq!(public.candidates.len(), 3);
+        assert!(
+            public
+                .candidates
+                .iter()
+                .find(|m| m.mod_type == "ue4ss")
+                .unwrap()
+                .enabled
+        );
+        let report = adopt(
+            &mut conn,
+            &library,
+            &data,
+            &held,
+            &public
+                .candidates
+                .iter()
+                .map(|candidate| AdoptionGroup {
+                    candidate_ids: vec![candidate.id.clone()],
+                    name: candidate.name.clone(),
+                    allow_unverified: false,
+                })
+                .collect::<Vec<_>>(),
+            None,
+        );
+        assert!(
+            report.outcomes[0].error.is_none(),
+            "{:?}",
+            report.outcomes[0].error
+        );
+        let mods = database::list_mods(&conn).unwrap();
+        assert_eq!(mods.len(), 3);
+        assert!(mods
+            .iter()
+            .all(|item| item.bundle_id.is_none() && item.bundle_name.is_none()));
+        assert!(mods
+            .iter()
+            .any(|m| m.mod_type == "plugin" && m.files.len() == 2));
+        assert_eq!(
+            fs::read(game.join(UE4SS_ROOT).join("mods.txt")).unwrap(),
+            b"Paint : 0\n"
+        );
+        for m in &mods {
+            for file in &m.files {
+                assert_eq!(sha256(Path::new(&file.destination)).unwrap(), file.sha256);
+            }
+        }
+    }
+
+    #[test]
+    fn changed_candidate_rolls_back_without_affecting_separate_successful_adoptions() {
+        let root = tempdir().unwrap();
+        let game = root.path().join("game");
+        let data = root.path().join("data");
+        let library = data.join("mods");
+        fs::create_dir_all(&library).unwrap();
+        write(&game.join(PACKAGED_ROOT).join("One.pak"), b"one");
+        write(&game.join(PACKAGED_ROOT).join("Two.pak"), b"two");
+        let mut conn = database::open(&data.join("db")).unwrap();
+        let (public, held) = discover(&conn, &game, &ToolInfo::default()).unwrap();
+        let ids = public
+            .candidates
+            .iter()
+            .map(|m| m.id.clone())
+            .collect::<Vec<_>>();
+        write(
+            &held.candidates[&ids[1]].files[0].source,
+            b"modified since scan",
+        );
+        let report = adopt(
+            &mut conn,
+            &library,
+            &data,
+            &held,
+            &ids.iter()
+                .map(|id| AdoptionGroup {
+                    candidate_ids: vec![id.clone()],
+                    name: held.candidates[id].public.name.clone(),
+                    allow_unverified: false,
+                })
+                .collect::<Vec<_>>(),
+            None,
+        );
+        assert!(report.outcomes[0].error.is_none());
+        assert!(report.outcomes[1].error.is_some());
+        assert_eq!(database::list_mods(&conn).unwrap().len(), 1);
+        assert_eq!(fs::read_dir(&library).unwrap().count(), 1);
+        assert!(!data.join(JOURNAL_NAME).exists());
+        assert_eq!(
+            fs::read(game.join(PACKAGED_ROOT).join("One.pak")).unwrap(),
+            b"one"
+        );
+    }
+
+    #[test]
+    fn legacy_merge_recovery_preserves_profiles_and_checkpoints_and_rolls_back() {
+        let root = tempdir().unwrap();
+        let game = root.path().join("game");
+        let data = root.path().join("data");
+        let library = data.join("mods");
+        fs::create_dir_all(&library).unwrap();
+        write(&game.join(PACKAGED_ROOT).join("One.pak"), b"one");
+        write(&game.join(PACKAGED_ROOT).join("Two.pak"), b"two");
+        let mut conn = database::open(&data.join("db")).unwrap();
+        let (public, held) = discover(&conn, &game, &ToolInfo::default()).unwrap();
+        let legacy = adopt_candidate(
+            &mut conn,
+            &library,
+            &data,
+            &held,
+            &AdoptionGroup {
+                candidate_ids: public.candidates.iter().map(|m| m.id.clone()).collect(),
+                name: "Legacy".into(),
+                allow_unverified: false,
+            },
+            None,
+        )
+        .unwrap();
+        let profile = crate::profiles::create(&conn, "Campaign", "").unwrap();
+        conn.execute("UPDATE profiles SET is_active=0", []).unwrap();
+        conn.execute(
+            "UPDATE profiles SET is_active=1 WHERE id=?1",
+            [&profile.summary.id],
+        )
+        .unwrap();
+        crate::profiles::capture_active(&conn).unwrap();
+        let snapshot = crate::profiles::snapshot(&conn, "Before", "manual", true, None).unwrap();
+        let error: Result<()> =
+            crate::package_transaction::run(&mut conn, &data, &library, &game, |conn| {
+                crate::library_groups::restore_components(conn, &library, &game, &legacy.id)?;
+                Err(AppError::Other("injected late failure".into()))
+            });
+        assert!(error.is_err());
+        assert_eq!(database::list_mods(&conn).unwrap().len(), 1);
+        assert_eq!(database::file_records(&conn, &legacy.id).unwrap().len(), 2);
+        write(&game.join(PACKAGED_ROOT).join("One.pak"), b"user edit");
+        let rejected = crate::package_transaction::run(&mut conn, &data, &library, &game, |conn| {
+            crate::library_groups::restore_components(conn, &library, &game, &legacy.id)
+        });
+        assert!(rejected.is_err());
+        assert_eq!(database::list_mods(&conn).unwrap().len(), 1);
+        assert_eq!(
+            fs::read(game.join(PACKAGED_ROOT).join("One.pak")).unwrap(),
+            b"user edit"
+        );
+        write(&game.join(PACKAGED_ROOT).join("One.pak"), b"one");
+        let count = crate::package_transaction::run(&mut conn, &data, &library, &game, |conn| {
+            crate::library_groups::restore_components(conn, &library, &game, &legacy.id)
+        })
+        .unwrap();
+        assert_eq!(count, 2);
+        let mods = database::list_mods(&conn).unwrap();
+        assert_eq!(mods.len(), 2);
+        assert!(mods
+            .iter()
+            .all(|m| m.bundle_id.is_none() && m.bundle_name.is_none()));
+        assert_eq!(database::counts(&conn).unwrap(), (2, 2));
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM profile_mods WHERE profile_id=?1",
+                [&profile.summary.id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        let json: String = conn
+            .query_row(
+                "SELECT payload_json FROM snapshots WHERE id=?1",
+                [snapshot.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let lock: crate::models::ProfileLock = serde_json::from_str(&json).unwrap();
+        assert_eq!(lock.mods.len(), 2);
+        assert!(lock
+            .mods
+            .iter()
+            .all(|m| m.file_hashes.len() == 1 && m.bundle_id.is_none()));
+        for m in &mods {
+            let rows = database::file_records(&conn, &m.id).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                sha256(&library.join(&m.id).join("payload").join(&rows[0].0)).unwrap(),
+                rows[0].3
+            );
+        }
+        assert_eq!(
+            fs::read(game.join(PACKAGED_ROOT).join("One.pak")).unwrap(),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(game.join(PACKAGED_ROOT).join("Two.pak")).unwrap(),
+            b"two"
+        );
     }
 
     #[test]

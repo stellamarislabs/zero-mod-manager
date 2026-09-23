@@ -7,7 +7,7 @@ export interface GameInfo {
   installState: string | null;
   engine: string;
   compatDataPath: string | null;
-  source: "automatic" | "manual" | "none";
+  source: "automatic" | "manual" | "ea" | "none";
   /** A recoverable discovery problem, such as a saved path moved elsewhere. */
   problemCode?: "game_path_invalid" | string | null;
   problem?: string | null;
@@ -18,7 +18,7 @@ export interface Ue4ssInfo {
   /** Every file the runtime needs is present. Not a claim that it ever loaded. */
   healthy: boolean;
   modCount: number;
-  /** UE4SS wrote its log, which is the only proof it actually loaded. */
+  /** A log file exists at a known path. Its age, contents and session are not verified. */
   logFound: boolean;
   logPath: string | null;
   /** Proxy DLLs beside the game executable other than UE4SS's own dwmapi.dll. */
@@ -35,65 +35,6 @@ export interface Ue4ssInstallReport {
   protonHint: boolean;
 }
 
-export interface NexusAccount {
-  name: string;
-  premium: boolean;
-}
-
-export interface NexusStatus {
-  hasKey: boolean;
-  /** Who the stored key belongs to, remembered from when it was verified. */
-  accountName: string | null;
-  /** Only a premium account can resolve a download link without the website. */
-  premium: boolean;
-  /** Where the key is held. "database" means plain text, and is surfaced to the user. */
-  storage: "keyring" | "database" | null;
-  handlerRegistered: boolean;
-  /** The application currently holding nxm://, when it is not this one. */
-  handlerOwner: string | null;
-  /** Why registration cannot take effect on this system, if it cannot. */
-  handlerProblem: string | null;
-}
-
-export interface ModUpdate {
-  /** The installed mod, not the Nexus mod. */
-  modId: string;
-  name: string;
-  installedVersion: string | null;
-  installedFileId: number;
-  nexusModId: number;
-  latestFileId: number;
-  latestVersion: string | null;
-  latestFileName: string;
-  /** The mod's files tab, where a free account has to start the download. */
-  pageUrl: string;
-  /** The link the website would hand over; a premium key resolves it directly. */
-  nxmUrl: string;
-  checkedAt: string;
-}
-
-export interface ModUpdateReport {
-  updates: ModUpdate[];
-  /** Installed mods that carry Nexus provenance and can be checked at all. */
-  tracked: number;
-  checkedAt: string | null;
-  /** Mods matched to a Nexus page by their archive during this check. */
-  identified: number;
-  /** Installed mods that could not be matched, and so are not checked. */
-  unmatched: number;
-  /** Mods the user has taken out of checking, which are never looked up. */
-  ignored: number;
-  /** True when nothing was fetched and this is the stored result. */
-  fromCache: boolean;
-  problem: string | null;
-}
-
-export interface DownloadProgress {
-  name: string;
-  done: number;
-  total: number | null;
-}
-
 export interface Links {
   ue4ssDownload: string;
   nexusGame: string;
@@ -103,6 +44,7 @@ export interface Links {
 }
 
 export interface UpdateInfo {
+  releaseAvailable?: boolean;
   currentVersion: string;
   latestVersion: string;
   releaseUrl: string;
@@ -135,7 +77,7 @@ export interface Dashboard {
   ue4ss: Ue4ssInfo;
   previousBuildId: string | null;
   dataDirectory: string;
-  retoc: ToolInfo;
+  storageMode: "platform" | "portable";
   existingModScanPending: boolean;
 }
 
@@ -151,7 +93,11 @@ export type ModType = "iostore" | "pak" | "ue4ss" | "gamedir" | "plugin" | "conf
 export type PreviewType = ModType | "ue4ss-runtime";
 
 export interface ModSummary {
+  containerVerification?: string | null;
   id: string;
+  /** Components installed from one archive in a single atomic operation share this id. */
+  bundleId: string | null;
+  bundleName?: string | null;
   name: string;
   version: string | null;
   modType: ModType;
@@ -173,6 +119,16 @@ export interface ModSummary {
   /** Its retained FOMOD installer can be opened again. */
   fomod: boolean;
   files: ModFile[];
+}
+
+export interface BundleInstallItem {
+  stagingId: string;
+  name: string | null;
+}
+
+export interface BundleInstallReport {
+  bundleId: string;
+  components: ModSummary[];
 }
 
 /** An installed mod a candidate would take the place of. */
@@ -260,6 +216,7 @@ export interface ModPreview {
   modType: PreviewType;
   files: string[];
   warnings: string[];
+  supplementaryFiles?: string[];
   valid: boolean;
   verification: "passed" | "failed" | "unavailable" | "not-required";
   verificationDetails: string | null;
@@ -332,14 +289,25 @@ export interface FomodSession {
 export interface Inspection {
   previews: ModPreview[];
   installer: FomodSession | null;
+  package: PackageAssessment;
+}
+
+export interface PackageAssessment {
+  role: "modBundle" | "runtime" | "externalTool" | "externalInstaller" | "unknown";
+  title: string;
+  reason: string;
+  nativeFiles: string[];
 }
 
 /** A retained FOMOD reopened with the recipe used for its last installation. */
-export interface FomodReconfiguration extends Inspection {
+export interface FomodReconfiguration {
+  previews: ModPreview[];
+  installer: FomodSession | null;
   answers: FomodAnswer[];
 }
 
 export interface ExistingModCandidate {
+  containerVerification?: string | null;
   id: string;
   name: string;
   version: string | null;
@@ -394,14 +362,11 @@ export interface DiagnosticReport {
 export interface AppSettings {
   gamePath: string | null;
   customExecutablePath: string | null;
-  retocPath: string | null;
   /** A 7-Zip executable the user pointed at, when the automatic search misses it. */
   sevenZipPath: string | null;
   logLevel: "normal" | "verbose" | "developer";
   advancedPackageNames: boolean;
   reducedMotion: boolean;
-  /** Allows one throttled Nexus update check on start-up. Off by default. */
-  nexusAutoUpdateCheck: boolean;
 }
 
 export interface ManagedLibraryInfo {
@@ -411,5 +376,181 @@ export interface ManagedLibraryInfo {
 }
 
 export interface LaunchReport {
-  method: "steam" | "custom-executable";
+  method: "steam" | "ea" | "custom-executable";
+  sessionId: string | null;
+  mode: LaunchMode;
+}
+
+export type OperationalStatus = "ready" | "warning" | "blocked" | "unverified";
+export type LaunchMode = "modded" | "vanilla" | "troubleshoot";
+
+export interface ProfileSummary {
+  id: string;
+  name: string;
+  notes: string;
+  requiredRuntime: string | null;
+  createdAt: string;
+  updatedAt: string;
+  active: boolean;
+  enabledMods: number;
+  totalMods: number;
+}
+
+export interface ProfileModState {
+  modId: string;
+  name: string;
+  modType: ModType;
+  enabled: boolean;
+  loadPriority: number | null;
+  fomodAnswers: string | null;
+}
+
+export interface ProfileDetail extends ProfileSummary {
+  mods: ProfileModState[];
+}
+
+export interface ProfileChange {
+  modId: string;
+  name: string;
+  fromEnabled: boolean;
+  toEnabled: boolean;
+  fromPriority: number | null;
+  toPriority: number | null;
+}
+
+export interface ProfileSwitchPreview {
+  profileId: string;
+  profileName: string;
+  changes: ProfileChange[];
+  blocked: boolean;
+  reasons: string[];
+}
+
+export interface SnapshotSummary {
+  id: string;
+  profileId: string | null;
+  label: string;
+  kind: string;
+  createdAt: string;
+  lastKnownGood: boolean;
+}
+
+export interface OperationRecord {
+  id: string;
+  kind: string;
+  status: "pending" | "completed" | "failed" | "rolled-back";
+  summary: string;
+  detail: unknown;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface CompatibilityIssue {
+  id: string;
+  status: OperationalStatus;
+  ruleType: string;
+  title: string;
+  detail: string;
+  source: "local-analysis" | "community-catalog" | "author-manifest" | string;
+  evidenceUrl: string | null;
+  memberIds: string[];
+}
+
+export interface CompatibilityReport {
+  status: OperationalStatus;
+  generatedAt: string;
+  catalogState: string;
+  issues: CompatibilityIssue[];
+}
+
+export interface ReadinessIssue {
+  id: string;
+  status: OperationalStatus;
+  title: string;
+  detail: string;
+  action: string | null;
+}
+
+export interface LaunchPreflight {
+  status: OperationalStatus;
+  profileId: string | null;
+  profileName: string | null;
+  launcher: string;
+  gameBuild: string | null;
+  executableSha256: string | null;
+  runtimeVersion: string | null;
+  runtimeState: string;
+  enabledMods: number;
+  issues: ReadinessIssue[];
+}
+
+export interface LaunchSession {
+  id: string;
+  mode: LaunchMode;
+  profileId: string | null;
+  launcher: string;
+  gameBuild: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  outcome: "worked" | "not-loaded" | "crashed" | "performance-issue" | "unknown" | null;
+  logEvidence: string | null;
+}
+
+export interface IsolationObservation {
+  phase: string;
+  enabledModIds: string[];
+  outcome: NonNullable<LaunchSession["outcome"]>;
+}
+
+export interface IsolationSession {
+  id: string;
+  profileId: string;
+  phase: string;
+  status: "active" | "completed" | "cancelled";
+  candidateGroups: string[][];
+  currentModIds: string[];
+  observations: IsolationObservation[];
+  suspectedModIds: string[];
+  instruction: string;
+  createdAt: string;
+}
+
+export interface ConfigDocument {
+  path: string;
+  format: "ini" | "json" | "toml" | "lua";
+  content: string;
+  sha256: string;
+  writable: boolean;
+}
+
+export interface ConfigChangePreview {
+  path: string;
+  format: string;
+  beforeSha256: string;
+  afterSha256: string;
+  diff: string[];
+  valid: boolean;
+  problem: string | null;
+}
+
+export interface ConfigPatchRecord {
+  id: string;
+  profileId: string;
+  path: string;
+  format: string;
+  backupPath: string | null;
+  createdAt: string;
+}
+
+export interface SupportBundlePreview {
+  sections: string[];
+  redactions: string[];
+  estimatedFiles: number;
+  includesSaveData: boolean;
+}
+
+export interface SupportBundleReport {
+  path: string;
+  files: number;
+  redactionsApplied: number;
 }

@@ -1,13 +1,108 @@
 use crate::error::{AppError, Result};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::RwLock,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 use walkdir::WalkDir;
+
+const MAX_ARCHIVE_FILES: usize = 50_000;
+const MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const MAX_SINGLE_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_PATH_DEPTH: usize = 32;
+const MAX_COMPONENT_LENGTH: usize = 255;
+
+fn reserved_component(component: &str) -> bool {
+    let stem = component
+        .trim_end_matches(['.', ' '])
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0')
+}
+
+fn validate_relative(path: &Path) -> Result<()> {
+    let components = path.components().collect::<Vec<_>>();
+    if components.len() > MAX_PATH_DEPTH {
+        return Err(AppError::UnsafeArchive(format!(
+            "path nesting exceeds {MAX_PATH_DEPTH} levels: {}",
+            path.display()
+        )));
+    }
+    for component in components {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let text = name.to_string_lossy();
+        if text.chars().count() > MAX_COMPONENT_LENGTH {
+            return Err(AppError::UnsafeArchive(format!(
+                "a path component is longer than {MAX_COMPONENT_LENGTH} characters"
+            )));
+        }
+        if reserved_component(&text) {
+            return Err(AppError::UnsafeArchive(format!(
+                "reserved device name in {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_staged_tree(root: &Path) -> Result<()> {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| AppError::UnsafeArchive(error.to_string()))?;
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| AppError::UnsafeArchive(error.to_string()))?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        validate_relative(relative)?;
+        if entry.file_type().is_symlink() {
+            return Err(AppError::UnsafeArchive(format!(
+                "symbolic link {}",
+                relative.display()
+            )));
+        }
+        if entry.file_type().is_file() {
+            files += 1;
+            if files > MAX_ARCHIVE_FILES {
+                return Err(AppError::UnsafeArchive(format!(
+                    "archive expands to more than {MAX_ARCHIVE_FILES} files"
+                )));
+            }
+            let size = entry
+                .metadata()
+                .map_err(|error| AppError::UnsafeArchive(error.to_string()))?
+                .len();
+            if size > MAX_SINGLE_FILE_BYTES {
+                return Err(AppError::UnsafeArchive(
+                    "one file exceeds the 8 GiB safety limit".into(),
+                ));
+            }
+            bytes = bytes.saturating_add(size);
+            if bytes > MAX_EXPANDED_BYTES {
+                return Err(AppError::UnsafeArchive(
+                    "expanded content exceeds the 32 GiB safety limit".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub struct Staging {
     pub root: PathBuf,
@@ -52,7 +147,8 @@ pub(crate) fn archive_relative(name: &str) -> Option<PathBuf> {
             _ => path.push(part),
         }
     }
-    (!path.as_os_str().is_empty() && !unsafe_name(&path)).then_some(path)
+    (!path.as_os_str().is_empty() && !unsafe_name(&path) && validate_relative(&path).is_ok())
+        .then_some(path)
 }
 
 pub(crate) fn suspicious(path: &Path) -> bool {
@@ -61,7 +157,7 @@ pub(crate) fn suspicious(path: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(|e| e.to_ascii_lowercase())
             .as_deref(),
-        Some("exe" | "bat" | "cmd" | "ps1" | "dll" | "sh" | "msi" | "scr" | "vbs")
+        Some("exe" | "bat" | "cmd" | "ps1" | "dll" | "asi" | "sh" | "msi" | "scr" | "vbs",)
     )
 }
 
@@ -107,6 +203,13 @@ fn copy_tree(source: &Path, destination: &Path, executables: &mut Vec<String>) -
 fn extract_zip(source: &Path, destination: &Path, executables: &mut Vec<String>) -> Result<()> {
     let file = fs::File::open(source)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    if archive.len() > MAX_ARCHIVE_FILES {
+        return Err(AppError::UnsafeArchive(format!(
+            "archive contains more than {MAX_ARCHIVE_FILES} entries"
+        )));
+    }
+    let mut expanded = 0u64;
+    let mut compressed = 0u64;
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index)?;
         let enclosed = archive_relative(entry.name())
@@ -117,6 +220,23 @@ fn extract_zip(source: &Path, destination: &Path, executables: &mut Vec<String>)
                 "symbolic link {}",
                 entry.name()
             )));
+        }
+        if entry.size() > MAX_SINGLE_FILE_BYTES {
+            return Err(AppError::UnsafeArchive(
+                "one file exceeds the 8 GiB safety limit".into(),
+            ));
+        }
+        expanded = expanded.saturating_add(entry.size());
+        compressed = compressed.saturating_add(entry.compressed_size());
+        if expanded > MAX_EXPANDED_BYTES {
+            return Err(AppError::UnsafeArchive(
+                "expanded content exceeds the 32 GiB safety limit".into(),
+            ));
+        }
+        if compressed > 1024 * 1024 && expanded > compressed.saturating_mul(1000) {
+            return Err(AppError::UnsafeArchive(
+                "compression ratio is implausibly high".into(),
+            ));
         }
         let target = destination.join(&enclosed);
         // A directory entry may also be spelled with a trailing separator that
@@ -192,6 +312,35 @@ pub(crate) fn quiet_command(program: &Path) -> Command {
         command.creation_flags(0x0800_0000);
     }
     command
+}
+
+fn bounded_output(command: &mut Command) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut pipe) = child.stdout.take() {
+                pipe.read_to_end(&mut stdout)?;
+            }
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_end(&mut stderr)?;
+            }
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+        if started.elapsed() >= Duration::from_secs(120) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Other("The archive tool did not finish within two minutes and was stopped before deployment.".into()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Directories a Windows 7-Zip installation lands in.
@@ -369,10 +518,7 @@ fn split_backslash_names(root: &Path) -> Result<()> {
 
 fn extract_7z(source: &Path, destination: &Path, executables: &mut Vec<String>) -> Result<()> {
     let seven = find_7z().ok_or(AppError::SevenZipNotFound)?;
-    let listing = quiet_command(&seven)
-        .args(["l", "-slt", "--"])
-        .arg(source)
-        .output()?;
+    let listing = bounded_output(quiet_command(&seven).args(["l", "-slt", "--"]).arg(source))?;
     if !listing.status.success() {
         // RAR support is a separate, non-free codec that many 7-Zip builds omit,
         // and the failure otherwise looks like a corrupt download.
@@ -391,6 +537,9 @@ fn extract_7z(source: &Path, destination: &Path, executables: &mut Vec<String>) 
     }
     let text = String::from_utf8_lossy(&listing.stdout);
     let mut entries = false;
+    let mut file_count = 0usize;
+    let mut expanded = 0u64;
+    let mut compressed = 0u64;
     for line in text.lines() {
         if line.starts_with("----------") {
             entries = true;
@@ -402,15 +551,47 @@ fn extract_7z(source: &Path, destination: &Path, executables: &mut Vec<String>) 
         if let Some(name) = line.strip_prefix("Path = ") {
             let path =
                 archive_relative(name).ok_or_else(|| AppError::UnsafeArchive(name.to_string()))?;
+            file_count += 1;
+            if file_count > MAX_ARCHIVE_FILES {
+                return Err(AppError::UnsafeArchive(format!(
+                    "archive contains more than {MAX_ARCHIVE_FILES} entries"
+                )));
+            }
             note_executable(executables, &path);
+        } else if let Some(value) = line
+            .strip_prefix("Size = ")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            if value > MAX_SINGLE_FILE_BYTES {
+                return Err(AppError::UnsafeArchive(
+                    "one file exceeds the 8 GiB safety limit".into(),
+                ));
+            }
+            expanded = expanded.saturating_add(value);
+            if expanded > MAX_EXPANDED_BYTES {
+                return Err(AppError::UnsafeArchive(
+                    "expanded content exceeds the 32 GiB safety limit".into(),
+                ));
+            }
+        } else if let Some(value) = line
+            .strip_prefix("Packed Size = ")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            compressed = compressed.saturating_add(value);
         }
     }
-    let output = quiet_command(&seven)
-        .args(["x", "-y", "-snl", "-snh"])
-        .arg(format!("-o{}", destination.display()))
-        .arg("--")
-        .arg(source)
-        .output()?;
+    if compressed > 1024 * 1024 && expanded > compressed.saturating_mul(1000) {
+        return Err(AppError::UnsafeArchive(
+            "compression ratio is implausibly high".into(),
+        ));
+    }
+    let output = bounded_output(
+        quiet_command(&seven)
+            .args(["x", "-y", "-snl", "-snh"])
+            .arg(format!("-o{}", destination.display()))
+            .arg("--")
+            .arg(source),
+    )?;
     if !output.status.success() {
         return Err(AppError::Other(format!(
             "7z extraction failed: {}",
@@ -475,6 +656,10 @@ pub fn stage(source: &Path, cache: &Path) -> Result<Staging> {
         }
     };
     if let Err(error) = result {
+        let _ = fs::remove_dir_all(&root);
+        return Err(error);
+    }
+    if let Err(error) = validate_staged_tree(&root) {
         let _ = fs::remove_dir_all(&root);
         return Err(error);
     }
@@ -584,6 +769,22 @@ mod tests {
     fn drive_letters_are_rejected() {
         assert!(archive_relative("C:\\Windows\\evil.dll").is_none());
         assert!(archive_relative("mods/Good_P.pak").is_some());
+    }
+
+    #[test]
+    fn windows_device_names_are_rejected_on_every_host() {
+        assert!(archive_relative("mods/CON/config.ini").is_none());
+        assert!(archive_relative("mods/com1.txt").is_none());
+        assert!(archive_relative("mods/lpt9.lua").is_none());
+        assert!(archive_relative("mods/console.lua").is_some());
+    }
+
+    #[test]
+    fn deeply_nested_members_are_rejected_before_extraction() {
+        let name = std::iter::repeat_n("folder", MAX_PATH_DEPTH + 1)
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(archive_relative(&format!("{name}/mod.pak")).is_none());
     }
 
     #[test]

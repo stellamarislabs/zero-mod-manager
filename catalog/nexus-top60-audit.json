@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "researchedAt": "2026-09-21",
+  "ordering": "endorsements-all-time",
+  "evidence": "published-file-tree-or-installation-instructions",
+  "reviewedModIds": [
+    9, 34, 44, 20, 29, 30, 21, 23, 72, 3, 37, 55, 47, 73, 27,
+    160, 18, 14, 61, 33, 118, 58, 77, 2, 62, 38, 140, 109, 63, 110,
+    60, 40, 103, 133, 17, 137, 162, 105, 39, 48, 102, 174, 64, 154,
+    157, 135, 186, 153, 188, 129, 206, 10, 50, 201, 36, 53, 218, 100,
+    193, 11
+  ],
+  "regressionShapes": [
+    {
+      "name": "ue4ss-runtime",
+      "representativeModIds": [9],
+      "paths": ["dwmapi.dll", "ue4ss/UE4SS.dll", "ue4ss/signatures"],
+      "expectedRole": "runtime"
+    },
+    {
+      "name": "hybrid-ue4ss-iostore",
+      "representativeModIds": [34, 44, 58, 129, 133],
+      "paths": ["ue4ss/Mods/Example/dlls/main.dll", "pakchunk-example.pak", "pakchunk-example.utoc", "pakchunk-example.ucas"],
+      "expectedRole": "modBundle"
+    },
+    {
+      "name": "hybrid-ue4ss-plugin",
+      "representativeModIds": [55],
+      "paths": ["ue4ss/Mods/Example/Scripts/main.lua", "SWZeroCompany/Mods/Example/Example.uplugin", "SWZeroCompany/Mods/Example/AssetRegistry.bin"],
+      "expectedRole": "modBundle"
+    },
+    {
+      "name": "root-ini-preset",
+      "representativeModIds": [2, 20],
+      "paths": ["Engine.ini"],
+      "expectedRole": "unknown",
+      "blockedUntil": "semantic-ini-merge"
+    },
+    {
+      "name": "external-installer",
+      "representativeModIds": [118],
+      "paths": ["Aftermath_DLC_Setup.exe"],
+      "expectedRole": "externalInstaller"
+    },
+    {
+      "name": "external-authoring-tool",
+      "representativeModIds": [157],
+      "paths": ["ZeroCompanyModdingTool.exe", "BaseMods/Example.pak"],
+      "expectedRole": "externalTool"
+    },
+    {
+      "name": "native-proxy-asi-chain",
+      "representativeModIds": [11],
+      "paths": ["dsound.dll", "UniversalSigBypasser.asi", "pakchunk-localization.pak"],
+      "expectedRole": "modBundle"
+    },
+    {
+      "name": "loose-replacements-with-iostore",
+      "representativeModIds": [2, 10],
+      "paths": ["SWZeroCompany/Content/Movies/Intro.mp4", "SWZeroCompany/Splash/Splash.bmp", "pakchunk-example.utoc", "pakchunk-example.ucas"],
+      "expectedRole": "modBundle"
+    }
+  ]
+}

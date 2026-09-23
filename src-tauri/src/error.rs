@@ -16,12 +16,6 @@ pub enum AppError {
     UnsafeArchive(String),
     #[error("The mod is incomplete. Missing: {0}")]
     MissingIoStoreComponent(String),
-    #[error("This archive contains overlapping IoStore containers that appear to be alternative variants: {0}. Extract it and install only one variant.")]
-    AlternativeIoStoreVariants(String),
-    #[error("IoStore validation failed: {0}")]
-    RetocVerificationFailed(String),
-    #[error("retoc 0.1.5 is required to validate IoStore mods. Configure it in Settings.")]
-    RetocNotFound,
     #[error("UE4SS is not installed or its layout is incomplete.")]
     Ue4ssNotFound,
     #[error("That archive does not contain a UE4SS runtime. Expected dwmapi.dll next to a ue4ss folder.")]
@@ -30,26 +24,18 @@ pub enum AppError {
     DeploymentConflict(PathBuf),
     /// The literal prefix is part of the contract with the interface, which
     /// recognises this failure to offer the override that resolves it.
-    #[error("A managed file changed outside Zero Mod Manager: {0}. Some mods write their own settings or data files there while the game runs.")]
+    #[error("A managed file changed outside Zero Mod Manager: {0}")]
     ChecksumMismatch(PathBuf),
     #[error("The installation preview expired. Inspect the mod again.")]
     PreviewExpired,
     #[error("The proposed load order is invalid: {0}")]
     InvalidLoadOrder(String),
+    #[error("Close Star Wars: Zero Company before changing managed files. The current operation was not started.")]
+    GameRunning,
+    #[error("The compatibility catalog could not be trusted: {0}")]
+    CatalogUntrusted(String),
     #[error("This archive needs the 7-Zip command-line tool, and none was found. Install 7-Zip, or point Settings → Archive tool at your own 7z.exe.")]
     SevenZipNotFound,
-    #[error("That is not a usable Nexus Mods link: {0}")]
-    NexusLinkInvalid(String),
-    #[error("That download link is for another game ({0}), so it was ignored.")]
-    NexusLinkForAnotherGame(String),
-    #[error("Nexus Mods rejected the API key. Check it in Settings.")]
-    NexusUnauthorized,
-    #[error("Nexus Mods rate limit reached. Try again later.")]
-    NexusRateLimited,
-    #[error("A Nexus Mods API key is required. Add one in Settings.")]
-    NexusKeyMissing,
-    #[error("Nexus Mods returned no download link. Non-premium downloads must start from the Mod Manager Download button on the website.")]
-    NexusNoDownloadLink,
     #[error("Network request failed: {0}")]
     Network(String),
     #[error("Database error: {0}")]

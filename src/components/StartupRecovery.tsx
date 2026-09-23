@@ -11,13 +11,13 @@ export function StartupRecovery({ message, retrying, onRetry, onOpenLogs }: {
     <img className="brand-mark" src={brandMark} alt="" width={72} height={72} />
     <TriangleAlert aria-hidden size={28} />
     <div>
-      <p className="eyebrow">STARTUP NEEDS ATTENTION</p>
-      <h1>Your mod library could not be prepared</h1>
-      <p className="muted">Nothing was installed, removed, or changed. Retry the checks or open the application logs for the recorded cause.</p>
+      <p className="eyebrow">DATA UNAVAILABLE</p>
+      <h1>App data could not be loaded</h1>
+      <p className="muted">The latest state could not be read. Actions are paused to avoid using outdated information. Retry or open the logs for details.</p>
     </div>
     <pre>{message}</pre>
     <div className="startup-actions">
-      <button className="primary" disabled={retrying} onClick={onRetry}><RefreshCw className={retrying ? "spin" : ""} aria-hidden size={17} />{retrying ? "Retrying…" : "Retry startup"}</button>
+      <button className="primary" disabled={retrying} onClick={onRetry}><RefreshCw className={retrying ? "spin" : ""} aria-hidden size={17} />{retrying ? "Retrying…" : "Retry loading"}</button>
       <button onClick={onOpenLogs}><FolderOpen aria-hidden size={17} />Open logs</button>
     </div>
   </main>;

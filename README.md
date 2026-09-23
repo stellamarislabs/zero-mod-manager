@@ -3,20 +3,50 @@
   <h1>Zero Mod Manager</h1>
 </div>
 
-A dedicated open-source mod manager for **Star Wars: Zero Company**.
+A dedicated open-source mod operations console for **Star Wars: Zero Company**.
+
+> **Portable release note:** extract the ZIP before launching it. Release
+> executables contain the frontend and never require a localhost development
+> server. See [PORTABLE-DATA.md](PORTABLE-DATA.md) for the optional
+> self-contained data mode. Windows installer releases use the same production
+> executable as the portable archive.
 
 Zero Mod Manager understands Zero Company mod payloads instead of
 treating them as arbitrary files. It discovers Steam installations, validates
-IoStore containers with retoc, manages UE4SS script and DLL mods, installs
+IoStore companion files, manages UE4SS script and DLL mods, installs
 game-folder mods such as ReShade, detects package overlap,
-records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
+records SHA-256 ownership, and includes Linux/Proton-specific diagnostics (platform qualification is pending).
 
 > Zero Mod Manager is an independent continuation based on ZCOM Mod Manager
 > 0.6.5. It is not an official arctco release. This project is not affiliated with or
 > endorsed by Electronic Arts, Lucasfilm, Disney, Bit Reactor, or Nexus Mods.
 > Star Wars and related names are trademarks of their respective owners.
 
+## Continuation links and release status
+
+- [Source and development](https://github.com/stellamarislabs/zero-mod-manager)
+- [Bug reports](https://github.com/stellamarislabs/zero-mod-manager/issues)
+- [Application releases](https://github.com/stellamarislabs/zero-mod-manager/releases)
+
+0.7.0-rc.7 is a test candidate, not Stable. Read [download verification and
+Windows warnings](docs/RELEASE-SECURITY.md), [known limitations](KNOWN_LIMITATIONS.md),
+and [migration/rollback](docs/MIGRATION-ROLLBACK.md) before installing.
+The current local Windows packages are unsigned. Game acceptance is pending.
+
 ## Features
+
+- Command Center readiness with explicit Ready, Warning, Blocked, and
+  Unverified evidence states
+- Named profiles, previewable switching, Profile Lock import/export, automatic
+  snapshots, and Last Known Good checkpoints
+- Modded, temporary vanilla, and controlled troubleshoot launch sessions with
+  crash-safe profile restoration and user-labelled outcomes
+- Compatibility catalog verification infrastructure (public catalog not yet provisioned), with Ed25519, expiry,
+  rollback protection, evidence provenance, and offline last-known-good cache
+- Config Workbench for validated INI, JSON, and TOML changes, diff, backup, and
+  rollback; Lua remains read-only
+- Privacy-safe local support bundles with preview and automatic redaction
+- Steam and EA App installation metadata discovery, plus manual launch profiles
 
 - Steam AppID `2075800` discovery across default and additional libraries
 - Steam-aware game launch from the Home page, with an optional custom executable
@@ -27,14 +57,14 @@ records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
   by answering the author's questions, with images, descriptions, and
   recommended answers
 - Separate, labeled choices for packaged variants bundled in sibling folders
-- IoStore pair/triplet validation and retoc 0.1.5 verification
+- IoStore pair/triplet layout checks
 - PAK-only and UE4SS Lua/DLL mod support
 - Unreal plugin mods with their `.uplugin`, `AssetRegistry.bin`, and complete
   packaged content preserved under `SWZeroCompany/Mods`
 - Whole-file configuration mods for `Saved/Config/Windows`, with backup,
   restore, checksum guards, and a running-game safety check
 - Opt-in import from ZCOM Mod Manager 0.6.5 with verified library copying,
-  database backup, and separately approved Nexus credential migration
+  database backup; Nexus credentials are not imported
 - Existing-mod discovery and non-destructive adoption for packaged, UE4SS, and
   additive `LogicMods` installations
 - Relocatable manager-owned source library plus checksum-guarded deployment records
@@ -44,19 +74,17 @@ records SHA-256 ownership, and treats Linux/Proton as a first-class platform.
 - Optional spoiler-sensitive package paths, disabled by default
 - UE4SS layout checks and formatting-preserving `mods.txt` updates
 - Guided UE4SS runtime installation from a package you downloaded yourself
-- Opt-in Nexus Mods `nxm://` download handoff with protected API-key storage
-- On-demand update checking, with MD5 identification for mods installed before
-  the manager tracked provenance and an opt-in throttled check at start-up
+
 - Linux compatdata and Proton DLL-override diagnostics
 - Sanitized structured logs and a copyable Mod Doctor report
-- Release checking that remains disabled until the continuation repository and
-  Nexus page are explicitly configured at build time
+- Application release checking against this continuation's GitHub releases (not mod updates)
 - No account or always-on network requirement, telemetry, analytics, or advertisements
 
 ## Screenshots
 
-The application ships a restrained tactical dark interface with six primary
-areas: Home, Mods, Install, Diagnostics, Settings, and About. Release
+The application ships a restrained tactical dark interface with seven primary
+areas: Command Center, Library, Install, Profiles, Health, Settings,
+and About. Release
 screenshots are kept in `docs/screenshots/` when captured from a tagged build.
 
 The interface contains no extracted game assets. The application icon is the
@@ -69,8 +97,8 @@ project's own zero-ring mark, drawn as plain SVG in `src/assets/icon.svg`.
 | Linux | x86_64 | AppImage and `.deb` |
 | Windows 10/11 | x86_64 | NSIS `.exe` installer and portable `.zip` |
 
-Steam Deck/SteamOS should work through the x86_64 Linux AppImage. Add it as a
-non-Steam application if desired. See [Known Limitations](KNOWN_LIMITATIONS.md)
+Steam Deck/SteamOS and Linux package qualification are pending; do not treat
+these build targets as tested platforms. See [Known Limitations](KNOWN_LIMITATIONS.md)
 for the current boundaries.
 
 ## Supported Mod Types
@@ -86,7 +114,7 @@ Example_P.ucas
 ```
 
 UTOC and UCAS must share a basename and both must be present. A companion PAK
-is installed when supplied. retoc must verify every UTOC before installation.
+is installed when supplied. Container content verification is not performed.
 
 When an archive contains packaged alternatives in separate folders, the install
 review presents each folder as a labeled option instead of combining every
@@ -95,9 +123,12 @@ remain separate library entries.
 
 Required components can also ship together in one archive. Put a
 `zcom-mod.json` beside each component's payload; the review applies the nearest
-manifest to that component and offers **Install all components**. On upgrade,
-each component is matched to the installed payload it replaces, even if the old
-components originally came from separate archives.
+manifest to that component and offers **Install all components**. Fresh bundles
+are committed as one operation and are completely removed if any component
+fails. On upgrade, each component is matched to the installed payload it
+replaces, even if the old components originally came from separate archives;
+those replacement components are currently confirmed one at a time so each old
+version retains its existing rollback guarantee.
 
 ### PAK-only mods
 
@@ -118,7 +149,7 @@ enabled, ordered, and removed separately. UE4SS starts mods in the order
 `mods.txt` lists them, and that order is editable on the Load order tab; the
 managed block is kept directly before the runtime's `Keybinds` entry, while
 other runtime entries and comments keep their relative order. UE4SS must already
-have a healthy Zero Company layout. ZCOM Mod Manager does not redistribute
+have a healthy Zero Company layout. Zero Mod Manager does not redistribute
 UE4SS; drop a downloaded runtime package on the installer and it is recognized
 as the runtime rather than as a mod.
 
@@ -154,19 +185,19 @@ changed later from the library; renaming never touches deployed file names.
 
 ### Migrating existing mods
 
-When ZCOM first connects to a game installation, it checks the controlled mod
+When Zero Mod Manager first connects to a game installation, it checks the controlled mod
 folders for packages installed by hand or by another manager. The same scan is
-always available from **Mods → Discover existing mods**.
+always available from **Library → Scan game folder**.
 
 PAK/IoStore container families, UE4SS mod folders, and additive `LogicMods` can
 be adopted. Review the candidates, optionally merge container families that
-belong to one download, edit their names, and select what ZCOM should manage.
+belong to one download, edit their names, and select what Zero Mod Manager should manage.
 Adoption copies each payload into the managed library and records checksums;
 the live files, filenames, load order, and `mods.txt` are not changed.
 
 Known UE4SS runtime components are shown but unchecked. Replacement-style
 game-folder mods such as ReShade are reported but cannot be adopted safely,
-because ZCOM did not see and back up the original file they replaced.
+because Zero Mod Manager did not see and back up the original file they replaced.
 
 ## Installation
 
@@ -174,20 +205,19 @@ Download the package for your platform from the GitHub release:
 
 - Linux: make the AppImage executable and run it, or install the `.deb`.
 - Windows: run the NSIS installer, or extract the portable `.zip` anywhere and
-  run `ZCOM Mod Manager.exe`. Keep `retoc.exe` beside it: the portable build
-  cannot verify or repack IoStore containers without the sidecar. The portable
+  run `Zero Mod Manager.exe`. Third-party tools are not silently bundled. The portable
   build also assumes the Microsoft Edge WebView2 runtime is already present,
   which it is on Windows 11 and on Windows 10 machines with current Edge; the
   installer downloads it when missing. Community builds are unsigned, so
-  Windows SmartScreen may show a warning. Verify the release checksum and
-  repository before choosing **Run anyway**.
+  Windows SmartScreen may show a warning. See docs/RELEASE-SECURITY.md;
+  do not disable Windows security protections.
 
-Release packages include the MIT-licensed retoc 0.1.5 sidecar. 7z files use the
-system `7z` command: install `p7zip`/`7zip` if it is not already available.
+Release packages do not include an archive extractor. ZIP is built in; 7z
+and RAR archives use a host-installed 7-Zip/NanaZip-compatible command.
 
 ## Quick Start
 
-1. Start ZCOM Mod Manager.
+1. Start Zero Mod Manager.
 2. Confirm the automatically detected game path, or choose **Locate game**.
 3. Open **Install** and drop a downloaded mod archive onto the window.
 4. Review detected files, verification, compatibility, and conflicts.
@@ -239,11 +269,11 @@ everything it decided, and returns that step exactly as it was left.
 
 Only the files the answers selected are installed. They are written into a
 sandbox of their own and then read exactly like an ordinary download, so the
-result reaches the same review screen, with the same container verification,
+result reaches the same review screen, with the same file safety checks,
 conflict detection, compatibility check, and naming, as any other mod. An
 archive holding sixteen mutually exclusive variants therefore becomes one mod
-entry rather than sixteen options to compare by hand, and the download it came
-from is still recorded, so update checking keeps working.
+entry rather than sixteen options to compare by hand, and its selected options
+remain recorded for later reconfiguration.
 
 After a guided install is confirmed, the manager retains the complete FOMOD
 source tree and the answers used—not only the selected payload. Its library row
@@ -285,9 +315,8 @@ Two levels are tracked:
 
 1. **Filesystem collision:** two payloads target the same destination. A new
    install never overwrites an existing file.
-2. **Package collision:** retoc package identifiers are hashed and stored. Mods
-   that override the same identifiers are reported as overlapping packages,
-   even when container filenames differ.
+2. **Asset collision:** new container assets are not scanned. Previously recorded
+   package overlap data and explicit compatibility rules may still be displayed.
 
 Normal UI and logs show only overlap counts. Raw asset paths are exposed only
 after the user enables advanced package names in Settings and opens Advanced
@@ -308,19 +337,16 @@ before a rename. A failed filesystem or database step rolls back, and an
 interrupted operation is recovered at the next startup.
 
 IoStore triplets are orderable because both priority directions were
-demonstrated against Zero Company's runtime and re-verified with retoc after
+demonstrated against Zero Company's runtime and checked for unchanged file bytes after
 each rename. Pure UTOC/UCAS pairs and PAK-only mods remain visible but
 non-orderable. The pair layout is untested; the PAK-only capability fixture did
 not pass the runtime gate. PAK-only package contents also remain opaque, so
 their overlap winners cannot be identified automatically.
 
-## Container Verification
+## Container handling
 
-ZCOM Mod Manager invokes bundled or user-selected **retoc 0.1.5** using
-`retoc verify <container.utoc>` and collects package identifiers with `retoc
-list --package --path`. A failed or unavailable verifier prevents IoStore
-installation. Tool output shown in normal mode has home-directory prefixes
-replaced with `~` and is truncated to avoid accidental data disclosure.
+IoStore companion files are checked without an external verifier. Container contents
+and asset-level overlaps are not inspected. File checksums and archive safety remain enabled.
 
 ## UE4SS Mods
 
@@ -365,7 +391,7 @@ paired with stale scripts.
 The manager reports how many files it wrote and which it kept. To adopt a
 shipped `UE4SS-settings.ini`, rename or delete your copy and install again.
 
-Either flow also works through the Nexus Mods handoff described below.
+Download the archive in your browser and open it in Install.
 
 ## Linux / Proton
 
@@ -407,100 +433,17 @@ through standard Tauri signing secrets without changing application behavior.
 ## Diagnostics
 
 **Mod Doctor** checks the game layout, manifest/build, `~mods`, owned mods,
-package conflicts, retoc, UE4SS, compatdata, and the Proton DLL override. The
+reported conflicts, UE4SS, compatdata, and the Proton DLL override. The
 report is copyable and home-directory paths are sanitized. Structured JSONL
 logs are available from Settings → **Open logs folder**.
 
-## Nexus Mods Handoff
+## Manual downloads
 
-The manager does not browse, search, or scrape Nexus Mods, and it never starts a
-download on its own. Downloads begin where they are meant to: on the website.
-
-1. In **Settings → Nexus Mods downloads**, paste a personal API key from
-   <https://www.nexusmods.com/users/myaccount?tab=api>. The key is verified
-   against Nexus before it is stored.
-2. Enable **Handle `nxm://` links from the browser**. Nothing touches your
-   desktop configuration or registry until you do, and turning it off hands the
-   association back to whatever held it before.
-3. On any Zero Company mod page, press **Mod Manager Download**. The browser
-   passes the link over, the file is fetched with a progress readout, and it
-   lands in the same review screen as a mod you picked by hand — same
-   validation, same conflict checks, same confirmation before anything deploys.
-
-A link for any other game is refused rather than downloaded.
-
-### Update checking
-
-A download through the handoff records which Nexus mod and file it came from,
-and installation attaches that to the mod. **Check for updates** on the Mods
-page then asks Nexus what each of those mods now offers, and marks the ones with
-a newer file.
-
-A library installed before any of that is not left out. The same check offers
-the MD5 of each unmatched mod's archive to Nexus, which recognises the file it
-was uploaded as and identifies the mod and file exactly — no download and no
-guessing from names. An archive Nexus does not recognise is remembered, so an
-automatic check does not ask about it again.
-
-A mod whose archive is gone, or that was adopted from the game folder and never
-had one, can be pointed at its Nexus page by hand: open **More details** and
-paste the mod's address. The file recorded as installed is the one carrying the
-installed version, so linking never invents an update.
-
-A linked mod can be opened on Nexus from its row in the library or from **More
-details**, so its description, changelog, and comments are one click away.
-
-**More details** is also where a mod leaves checking for good. That matters for
-anything not published on Nexus — a mod you built yourself, or one from
-elsewhere — because its archive is otherwise offered to the lookup on every
-check you ask for. An excluded mod is left out of the checks and the lookup
-alike, and **Check this mod again** puts it back.
-
-An update is the newest file still offered under `MAIN` or `UPDATE`. Superseded,
-archived, and deleted files are ignored, an optional extra is never treated as
-an upgrade, and newer is decided by file id, which Nexus issues in upload order.
-
-A premium account can fetch the update from the Mods page; it lands in the same
-review screen and replaces the installed mod through the same path a website
-handoff uses. A free account is sent to the mod's files tab, because only the
-website can mint the key the download link needs.
-
-Nothing is checked unless you ask. **Settings → Nexus Mods downloads** offers an
-opt-in start-up check, off by default, and its result stands for six hours so
-reopening the manager does not spend your API allowance.
-
-If another mod manager already holds `nxm://`, Settings names it rather than
-failing silently, and the switch takes the association over. Turning the switch
-off hands it back.
-
-Linux desktop associations have two traps that this application works around,
-both of which otherwise fail without any error message. `xdg-mime` resolves a
-desktop entry by passing the first whitespace-separated word of `Exec` to
-`command -v` without removing quotes, so a quoted path is never resolved; the
-entry is written unquoted, using a symbolic link when the real path needs
-quoting. And `xdg-mime query` reads `<desktop>-mimeapps.list` before the
-generic `mimeapps.list` while `xdg-mime default` only writes the generic one,
-so a scheme claimed in the prefixed file can never be taken over by
-registering normally; the prefixed files are updated as well.
-
-### Where the API key is kept
-
-The key is stored in the operating system's secret store: GNOME Keyring or
-KWallet through the Secret Service, or Credential Manager on Windows. If no
-secret store is available — common on a minimal Linux install — the key falls
-back to the application database in plain text and **Settings says so**, rather
-than implying a protection that is not there.
-
-The key can download on your behalf and is rate-limited against your account.
-Treat it like a password: it is never logged, never sent anywhere except
-`api.nexusmods.com`, and **Remove stored key** clears both locations.
-
-### Why a key is required at all
-
-A non-premium Nexus account cannot obtain a download link from the API alone.
-The `key` and `expires` pair that authorises the download is minted by the
-website when you press **Mod Manager Download**, which is precisely why the
-handoff exists rather than an in-application browser.
+Download archives in your browser, then open them in **Install**. Discover,
+Nexus account/API access, mod update queries, and `nxm://` downloads are no longer
+part of Zero Mod Manager. Ordinary external Nexus links remain available.
+If an earlier version owned `nxm://` links, reselect Vortex as the handler in
+Vortex settings. This update does not overwrite another application's handler.
 
 ## Optional `zcom-mod.json` Manifest
 
@@ -536,16 +479,14 @@ Requirements:
 - `7z` for 7z archive installation/tests
 
 ```bash
-git clone <continuation-repository-url>
-cd ZeroModManager
+git clone https://github.com/stellamarislabs/zero-mod-manager.git
+cd zero-mod-manager
 npm ci
-npm run prepare:retoc
 npm run tauri build
 ```
 
-`prepare:retoc` explicitly downloads the official upstream 0.1.5 archive when
-no local `retoc` exists and verifies the publisher-provided SHA-256 file. Set
-`RETOC_SOURCE=/trusted/path/to/retoc` to use an existing binary.
+No third-party runtime or modding tool is fetched as part of the application
+build. Container companion-file layout checks use synthetic fixtures.
 
 ## Development
 
@@ -556,9 +497,10 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri dev
 ```
 
-One test is ignored by default because it needs a real published package that
-CI cannot download. To exercise the UE4SS installer end to end, download a
-package from the mod page above and run:
+Three tests are ignored by default because they need legal local fixtures that
+CI cannot download: an IoStore triplet, representative mod archives, and a real
+UE4SS distribution package. To exercise the UE4SS installer end to end,
+download a package from the mod page above and run:
 
 ```bash
 ZERO_MOD_MANAGER_UE4SS_ARCHIVE=/path/to/ue4ss-package.zip \
@@ -581,7 +523,6 @@ src-tauri/src/mods/          payload and manifest recognition
 src-tauri/src/fomod/         FOMOD installer scripts and guided selection
 src-tauri/src/adoption.rs    existing-mod discovery and adoption
 src-tauri/src/deployment/    ownership-safe lifecycle
-src-tauri/src/retoc/         verifier abstraction
 src-tauri/src/ue4ss/         runtime and mods.txt handling
 src-tauri/src/database/      SQLite schema and queries
 src-tauri/src/diagnostics/   Mod Doctor
@@ -590,33 +531,21 @@ schema/                      optional community manifest schema
 
 ## Release Builds
 
-CI builds the production executable on every main-branch push and pull request.
-Tags matching `v*` publish a GitHub release immediately and attach Linux
-AppImage/deb and Windows NSIS installer/portable zip artifacts. The release is
-not a draft, so bump the version in `package.json`, `package-lock.json`,
-`src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`,
-then smoke-test both platforms before tagging. The release workflow rejects a
-tag that does not match those files.
-
-```bash
-npm run check:release-version -- v0.4.1
-git tag -s v0.7.0 -m "Zero Mod Manager 0.7.0"
-git push origin v0.7.0
-```
-
-Confirm checksums after the run finishes. See
-[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) before release.
+See [the release runbook](docs/RELEASE-RUNBOOK.md). Approved version tags prepare
+a **draft** release with binary packages, exact tagged source, and checksums.
+Nothing is automatically promoted to a public release. Stable requires the
+signing and game-qualification gates. For local Windows preparation, run
+`scripts/prepare-release.ps1` with PowerShell 7; it does not push or publish.
 
 ## Roadmap
 
 - **0.2:** conflict-aware packaged-mod load order, Steam launch, and automatic
   manager release notices shipped; profiles and dependency metadata remain
-- **0.3:** Nexus handoff shipped; per-mod update checking has since shipped
-  too, and Nexus catalog browsing remains out of scope
+- **0.7:** Local-first installation; retired Nexus API and download handoff.
 - **0.4:** existing-mod migration, bundled packaged-variant selection, and a
   custom game executable shipped
 - **0.6:** guided FOMOD installers for archives that script their own options
-- **Future / separate project:** ZCOM Mod Studio for asset inspection and authoring
+- **Future / separate project:** Zero Mod Studio for asset inspection and authoring
 
 ## Contributing
 
@@ -627,12 +556,11 @@ with real user paths or game data.
 
 ## Credits
 
-Thanks to the Zero Company modding community and to the maintainers of retoc, Tauri, React, rusqlite, zip-rs, and the wider open-source ecosystem.
+Thanks to the Zero Company modding community and to the maintainers of Tauri, React, rusqlite, zip-rs, and the wider open-source ecosystem.
 
 ## Third-Party Software
 
-retoc is MIT-licensed and is bundled unmodified in release packages. Exact
-copyright and license notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Exact copyright and license notices for third-party dependencies are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 No code was copied from Vortex or another mod manager.
 
 ## License

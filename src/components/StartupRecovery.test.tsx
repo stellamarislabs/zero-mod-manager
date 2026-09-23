@@ -14,7 +14,7 @@ describe("startup recovery", () => {
 
     expect(screen.getByRole("alert")).toBeDefined();
     expect(screen.getByText("database is locked")).toBeDefined();
-    await userEvent.click(screen.getByRole("button", { name: "Retry startup" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry loading" }));
     await userEvent.click(screen.getByRole("button", { name: "Open logs" }));
     expect(retry).toHaveBeenCalledOnce();
     expect(logs).toHaveBeenCalledOnce();

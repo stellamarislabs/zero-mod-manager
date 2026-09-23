@@ -109,24 +109,22 @@ pub fn detect(game: Option<&Path>, compat_data: Option<&Path>) -> Ue4ssInfo {
         Some("The UE4SS layout is incomplete (dwmapi.dll, UE4SS.dll, or Mods is missing).".into())
     } else if installed && vc_runtime == Some(false) {
         Some(
-            "The Visual C++ 2015-2022 x64 runtime is missing, so Windows cannot load the UE4SS \
-             loader. Install it from Microsoft, then start the game again."
+            "Visual C++ runtime files were not found in System32. UE4SS may need them; \
+             a local runtime installation has not been checked."
                 .into(),
         )
     } else if installed && proton_override == Some(false) {
         Some("UE4SS may not load under Proton. Add WINEDLLOVERRIDES=\"dwmapi=n,b\" %command% to Steam launch options.".into())
     } else if healthy && !extra_loaders.is_empty() {
         Some(format!(
-            "Another proxy DLL sits beside the game executable: {}. UE4SS loads only as \
-             dwmapi.dll, and a renamed copy starts the game without ever loading the runtime. \
-             Remove the extra file unless another tool needs it.",
+            "Other proxy DLLs were found: {}. They may belong to another tool; \
+             their presence alone does not establish a UE4SS conflict. Review them if runtime mods fail.",
             extra_loaders.join(", ")
         ))
     } else if healthy && log.is_none() {
         Some(
-            "The layout is complete, but UE4SS has never written a log, so it has not loaded \
-             yet. Start the game once; if no log appears, the loader is being blocked before it \
-             runs."
+            "The expected UE4SS files are present, but no log was found at the known paths. \
+             This does not confirm whether UE4SS loaded in the current game session."
                 .into(),
         )
     } else {
@@ -145,7 +143,7 @@ pub fn detect(game: Option<&Path>, compat_data: Option<&Path>) -> Ue4ssInfo {
     }
 }
 
-/// Counts the mod folders UE4SS will load. A mod ships Lua scripts, a native
+/// Counts folders containing UE4SS payloads, regardless of enablement or load success. A mod ships Lua scripts, a native
 /// DLL, or both, so counting `main.lua` alone missed every DLL mod.
 fn installed_mod_folders(mods: &Path) -> usize {
     WalkDir::new(mods)
@@ -353,6 +351,7 @@ pub fn write_order(game: &Path, ordered: &[(String, bool)]) -> Result<()> {
     if !value.is_empty() {
         value.push_str(line_ending)
     }
+    crate::package_transaction::protect_file(&path)?;
     fs::write(path, value)?;
     Ok(())
 }
@@ -404,6 +403,7 @@ pub fn update_mods_txt(game: &Path, name: &str, enabled: bool) -> Result<()> {
     if !value.is_empty() {
         value.push_str(line_ending)
     }
+    crate::package_transaction::protect_file(&path)?;
     fs::write(path, value)?;
     Ok(())
 }

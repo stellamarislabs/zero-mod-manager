@@ -129,6 +129,18 @@ pub fn from_source_name(stem: &str) -> (Option<String>, Option<String>) {
             }
         }
     }
+    // Explicit dotted suffixes in author-distributed archives, e.g. Mod-1.2.3.
+    // Never infer a release from a bare number such as "Squad 6".
+    if let Some((name, candidate)) = cleaned.rsplit_once([' ', '-', '_']) {
+        let version = candidate.trim_start_matches(['v', 'V']);
+        if !name.trim().is_empty()
+            && is_version(candidate)
+            && version.contains('.')
+            && version.split('.').all(|part| !part.is_empty())
+        {
+            return (Some(display_name(name)), Some(version.to_string()));
+        }
+    }
     (
         (!cleaned.trim().is_empty()).then(|| display_name(cleaned)),
         None,
@@ -137,6 +149,20 @@ pub fn from_source_name(stem: &str) -> (Option<String>, Option<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_explicit_archive_version_without_guessing_from_a_mod_name_number() {
+        assert_eq!(
+            super::from_source_name("BackpackFramework-1.0.0")
+                .1
+                .as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            super::from_source_name("Armor v2.1").1.as_deref(),
+            Some("2.1")
+        );
+        assert_eq!(super::from_source_name("Squad 6").1, None);
+    }
     use super::*;
 
     #[test]

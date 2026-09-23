@@ -1,6 +1,189 @@
 # Changelog
 
+## 0.7.0-rc.7 — Changed-file confirmation and safe retry
+
+- Fixed update and uninstall flows when a managed file changed and the transaction rolled back. The app now offers an explicit decision showing the affected path.
+- The decision names whether the changed file will be replaced or deleted. Cancelling keeps the installed mod and its files.
+- Removed the unsupported suggestion that every changed file is a mod-generated settings file; native DLLs can change too.
+- Added application and transaction regression tests for refusal, confirmation, retry, and complete removal.
+
+## 0.7.0-rc.6 — Reliable replacements and clearer Library
+
+- Standalone replacements no longer invoke complete-bundle updates. Only explicit bundle ownership enables that action; independent overlapping entries stay separate.
+- Deleted Library records are removed from pending replacement/conflict claims and obsolete package selections.
+- Native confirmations are asynchronous, awaited and fail closed. Confirm/save capabilities are explicitly enabled; rename uses an in-app dialog.
+- Single-entry upgrades preserve saved profile references, disabled state and Library visibility.
+- Deployment blocks cancelling or replacing its staged input. Subscription failures and toast cleanup are handled.
+- Library shows recorded installed versions, mixed bundle versions and missing-version labels. Explicit dotted archive-version suffixes are recognized.
+- Compact maintenance actions, contained long titles, clearer action spacing and accessible enable labels preserve the familiar table layout.
+
+## 0.7.0-rc.5 — Evidence-based status and consistent Windows branding
+
+- Optional load-order filename normalization no longer looks like an unresolved conflict or a pending user edit. Missing checks are not displayed as zero problems.
+- Runtime file detection, historical log presence, saved profile selections, and actual deployment are presented as different evidence. No log-file-existence check claims in-game success.
+- Failed refreshes invalidate stale status. Unreadable core data pauses actions, with a retry path. Tool, build, catalog and support results remain unknown when unavailable.
+- Profile totals group only explicit bundle identities. Saved profile changes can be reviewed even for the active profile; editing does not silently deploy.
+- Config changes cannot be applied using an outdated diff, and invalid runtime packages cannot be installed.
+- Window, taskbar, installer and existing application shortcuts use the same circular cyan logo. Installer updates preserve shortcut arguments and pin preferences.
+- Profile preview and applied order now agree; current-deployment snapshots preserve pending profile drafts. Profile switches enroll in the persistent rollback journal.
+- Session/support records use actual deployed selections, not requested runtime versions or profile drafts. Temporary launch guard prevents restoring a different unapplied saved state.
+- Vanilla/isolation wording explicitly states that runtime and unmanaged files remain; a repeated baseline cannot identify a runtime fault.
+- Added UI/backend regressions, SVG-to-ICO checks, actual Windows taskbar-property checks and isolated shortcut-upgrade fixtures.
+
+## 0.7.0-rc.4 — Independent mod identity and factory reset
+
+- Removed Merge/Group from existing-mod adoption. Every detected mod remains independent, even when all entries are selected. The backend rejects attempts to merge scan candidates.
+- Library identity no longer guesses bundles from a shared archive path. Explicitly installed bundles retain their Components drawer. Bundle installation requires one inspection and a reviewed grouping confirmation.
+- Organize mods can separate wrongly grouped entries without moving game files. Old flattened PAK/IoStore adoption records recover as separate mods, preserving applicable profile references and checkpoints.
+- Settings > Factory reset requires an acknowledgement and typed RESET. On next launch, app-owned data moves into recovery folders; game mods, saves and external custom library copies remain untouched. The manager closes before resetting, and interrupted resets can resume.
+- Startup creates the WebView only after reset and database initialization, so browser cache handles cannot block reset. Pending installations, package recovery and temporary launch states block reset until resolved.
+
+## 0.7.0-rc.3 — Existing mod adoption and bundle recovery
+
+- Group as one mod preserves independent component records, names, enabled states and load order. Mixed supported mod families can share a Components drawer.
+- Library > Organize mods groups already-managed entries without changing game files. Runtime-owned UE4SS components are excluded.
+- Explicit recovery for old Adopt/Merge PAK/IoStore records verifies ownership and checksums, restores component records and preserves profiles and compatible in-app checkpoints. Ambiguous records are rejected. Previously exported profile locks must be exported again.
+- Grouped adoption and legacy recovery use the persistent rollback journal. Scan results are rejected after changing game folders or during temporary launch recovery.
+- Discover full Unreal plugin folders in SWZeroCompany/Mods. UE4SS enabled.txt is recognized even when mods.txt disables or omits the mod, matching loader behavior.
+- Bundle titles survive component and whole-package updates; single-component bundles still expose their drawer.
+
+
+## 0.7.0-rc.2 — Package recovery and release hardening
+
+- Complete package updates now show replacement confirmation and retire components omitted from the new archive. An explicit target selector supports renamed packages.
+- Package installation, updates and removal use a persistent file/SQLite rollback journal. Managed single-mod installs, replacement, enable/disable and removal also use it. Startup restores an interrupted operation before normal database initialization.
+- Recovery copies are checksum-validated before restoration; interrupted files are retained locally for investigation. No game saves are collected.
+- Existing profile memberships and disabled state survive matched component upgrades.
+- GitHub update checks distinguish no public release from network errors, compare RC/stable versions correctly and let RC builds see published prereleases.
+- Local Clippy, formatting and production dependency checks are now part of the handoff.
+
+### Historical implementation notes (superseded where noted above)
+
+### Package-level library actions
+
+- Bundle rows keep the Library action layout, with package-wide enable/disable, verification, visibility and one-confirmation removal. Components remain available in a right-side drawer.
+- Removal preflights every component for changed active files before deleting any. RC2 adds persistent rollback for complete-package removal.
+- Individual component upgrades preserve package identity. RC2 additionally supports confirmed complete-package replacement and retirement of omitted components.
+
+### Custom executable administrator approval
+
+- Custom game launches request the standard Windows UAC prompt only when Windows requires elevation (error 740). Only the selected executable is elevated; the manager stays unchanged.
+- Declining approval cancels the launch without retries and returns through the existing temporary-profile recovery flow.
+- Other launch errors do not request administrator access.
+
+### Container-tool removal and bundled library
+
+- Removed external container verification, its tool settings, install/adoption prompts and health warnings. Archive safety, companion-file checks and managed-file checksum protection remain.
+- Library groups components by bundle identity or the exact original archive; bundle drawers expose individual component controls. Mod counts now count groups, not components.
+- Asset-level conflicts inside newly installed containers are no longer inspected.
+
+### Installation review noise reduction
+
+- Documentation, checksum lists and license text excluded from deployment are now neutral advanced details, not warnings.
+- Unknown payloads, native code, missing runtime, failed validation and compatibility warnings remain visible.
+- Moved non-actionable container/package metadata into advanced details.
+
+### Library clarity and compact layouts
+
+- Separated cleanup controls from navigation and removed negative tab spacing.
+- Added a default-on, view-only filter for known bundled UE4SS component folders.
+- Clarified mod totals, reduced repeated technical metrics, and collapsed secondary overview details.
+- Adapted the library table for narrow windows; secondary file actions remain available in mod details.
+- Shortened update error messages while retaining diagnostic detail in About.
+
+### Library and launch safety polish
+
+- Added selected-mod removal and temporary installation cleanup with explicit, destructive confirmation and acknowledgement.
+- Added a short Continue/Cancel explanation before Troubleshoot launches.
+- Made profile deletion discoverable; active and launch-recovery profiles cannot be deleted.
+- Lightened shared blue surfaces across pages while preserving the fixed navigation and launch bar.
+
+
+### Troubleshoot launch hotfix
+
+- Hide the Windows tasklist console during game-process polling.
+- Reject missing/empty executables before requesting launch or changing a temporary profile.
+- Preserve the pending profile recovery record if restoration fails.
+
+### Local-first workflow update
+
+- Removed Discover, Nexus API/account integration, mod update queries and nxm download handling. Manual archives and external Nexus links remain.
+- Made unavailable retoc verification optional with explicit consent; failed verification stays blocked. Unverified containers remain visible in Library and Health.
+- Reduced repetitive screen introductions and moved technical evidence into expandable details.
+- Retired this application's stored Nexus credentials; no Vortex credentials are touched.
+
 All notable changes are documented here.
+
+## 0.7.0-rc.1 — Operational Readiness
+
+### Added
+
+- Production Windows packaging now emits the installer and portable ZIP from
+  Tauri's release pipeline. A release smoke test launches an isolated copy and
+  requires the embedded frontend to report ready without a localhost server.
+- Portable builds use normal per-user data by default and support an explicit
+  self-contained mode through `portable-data.flag` beside the executable.
+- Archive inspection now distinguishes mod bundles, runtimes, external tools,
+  and external installers. Standalone/setup executables are never run and no
+  longer cause nested sample PAK files to be offered as mods.
+- Native payload discovery now includes ASI files plus `dsound`, `winhttp`, and
+  common XInput proxy DLLs.
+- Fresh multi-component downloads now install through one backend transaction.
+  Components share a persistent bundle identity; a failure in deployment,
+  metadata, ordering, or profile capture removes the complete new bundle and
+  leaves its staged archive available for retry.
+
+- A Command Center with four explicit readiness states: Ready, Warning,
+  Blocked, and Unverified. Launch decisions now include the selected profile,
+  launcher, game build, compatibility findings, and UE4SS runtime evidence.
+- Named profiles, previewable atomic profile switches, portable Profile Lock
+  files, automatic snapshots, and user-created Last Known Good checkpoints.
+- Modded, temporary vanilla, and controlled troubleshoot launch modes. The
+  previous profile is restored after temporary sessions and after an
+  interrupted manager restart; session outcomes are labelled by the user rather
+  than inferred from a process exit.
+- A provenance-aware compatibility engine combining deployed-file ownership,
+  IoStore package overlap, manifest relationships, and signed community rules.
+  Ed25519 verification, expiry, schema checks, rollback protection, and a last
+  verified local cache are enforced before catalog data is trusted.
+- Config Workbench support for validated INI, JSON, and TOML edits with preview,
+  backups, optimistic concurrency checks, and rollback. Lua is deliberately
+  read-only.
+- Privacy-previewed local support bundles containing operational, profile,
+  compatibility, diagnostic, and bounded log evidence. Credentials, personal
+  paths, and save contents are excluded or redacted; bundles are never uploaded.
+- Steam, EA App metadata, and manual launcher profiles; activity history;
+  local-first manual archive installation; and public Manifest v2,
+  Profile Lock v1, and Compatibility Catalog v1 contracts.
+
+### Security
+
+- All deployment mutations are refused while the game is running.
+- Archive staging now enforces traversal/link rejection, Windows device-name,
+  path depth, component length, file count, expanded-size, single-file size,
+  and compression-ratio limits before deployment.
+- Native payloads remain inert archive data: installers and scripts from a mod
+  are never executed.
+
+### Changed
+
+- The product is now branded Zero Mod Manager. ZCOM Mod Manager remains visible
+  only as the GPL-3.0 upstream project and migration source.
+- Navigation is organized around Command Center, Library, Discover, Install,
+  Profiles, Health, Settings, and About.
+- A file merely being in the expected folder is no longer sufficient evidence
+  that UE4SS loaded. Runtime health requires its game-session log and reports
+  proxy/VC runtime/Proton problems separately.
+- The application no longer presents an unverified Unreal Engine minor version
+  as fact. Runtime and build evidence will supply an exact fingerprint when it
+  is available.
+
+### Release qualification
+
+- RC status does not claim universal Nexus compatibility. Stable promotion
+  still requires the real-game/platform matrix in `docs/QA-MATRIX.md`, zero open
+  P0/P1 issues, release signatures/checksums, and publication of matching GPL
+  source.
 
 ## 0.6.5
 

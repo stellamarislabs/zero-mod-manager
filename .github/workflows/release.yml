@@ -18,8 +18,15 @@ jobs:
           - os: windows-2025
             args: --bundles nsis
     runs-on: ${{ matrix.os }}
+    env:
+      ZERO_MOD_MANAGER_PROJECT_URL: https://github.com/${{ github.repository }}
+      ZERO_MOD_MANAGER_RELEASE_API: https://api.github.com/repos/${{ github.repository }}/releases/latest
+      ZERO_MOD_MANAGER_NEXUS_URL: ${{ vars.ZERO_MOD_MANAGER_NEXUS_URL }}
     steps:
       - uses: actions/checkout@v4
+      - name: Refuse upstream publication
+        shell: bash
+        run: test "$GITHUB_REPOSITORY" = "stellamarislabs/zero-mod-manager"
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -35,13 +42,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf p7zip-full
       - run: npm ci
-      - name: Prepare verified retoc sidecar
-        if: runner.os == 'Linux'
-        run: npm run prepare:retoc
-      - name: Prepare verified retoc sidecar
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/prepare-retoc.ps1
+      - run: npm run typecheck
+      - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -51,8 +54,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Zero Mod Manager ${{ github.ref_name }}
           releaseBody: See CHANGELOG.md for release notes. Community builds are unsigned.
-          releaseDraft: false
-          prerelease: false
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-rc.') }}
           args: ${{ matrix.args }}
       - name: Package portable Windows zip
         if: runner.os == 'Windows'
@@ -65,15 +68,13 @@ jobs:
             ForEach-Object { Join-Path $release $_ } |
             Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $exe) { throw "app executable not found in ${release}: $((Get-ChildItem $release -Filter *.exe).Name -join ', ')" }
-          $retoc = Get-ChildItem $release -Filter "retoc*.exe" | Select-Object -First 1
-          if (-not $retoc) { throw "retoc sidecar not found in ${release}" }
+          ./scripts/smoke-production.ps1 -Executable $exe
           $version = "${{ github.ref_name }}" -replace '^v', ''
-          $stage = Join-Path $env:RUNNER_TEMP "portable"
-          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          $stage = Join-Path $env:RUNNER_TEMP ("portable-" + [guid]::NewGuid().ToString("N"))
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $exe (Join-Path $stage "Zero Mod Manager.exe")
-          Copy-Item $retoc.FullName (Join-Path $stage "retoc.exe")
-          Copy-Item LICENSE, README.md, THIRD_PARTY_NOTICES.md $stage
+          Copy-Item LICENSE, README.md, THIRD_PARTY_NOTICES.md, PORTABLE-DATA.md, KNOWN_LIMITATIONS.md $stage
+          Copy-Item docs/RELEASE-SECURITY.md $stage
           $asset = Join-Path $env:RUNNER_TEMP "Zero.Mod.Manager_${version}_x64-portable.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $asset -Force
           gh release upload "${{ github.ref_name }}" "$asset" --clobber
@@ -88,3 +89,45 @@ jobs:
           asset="$RUNNER_TEMP/$(basename "$appimage" | tr ' ' '.')"
           cp "$appimage" "$asset"
           gh release upload "${{ github.ref_name }}" "$asset" --clobber
+
+  publish-integrity:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload exact tagged source and release documentation
+        run: |
+          version="${RELEASE_TAG#v}"
+          git archive --format=zip --prefix="Zero.Mod.Manager_${version}-source/" --output="Zero.Mod.Manager_${version}-source.zip" HEAD
+          gh release upload "$RELEASE_TAG" "Zero.Mod.Manager_${version}-source.zip" docs/RELEASE-SECURITY.md KNOWN_LIMITATIONS.md --clobber
+      - name: Download the completed release payloads
+        run: |
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" --dir release-assets
+          rm -f release-assets/SHA256SUMS release-assets/SHA256SUMS.minisig
+      - name: Generate deterministic SHA-256 checksums
+        run: |
+          cd release-assets
+          find . -maxdepth 1 -type f -printf '%f\0' | sort -z | xargs -0 sha256sum -- > ../SHA256SUMS
+      - name: Sign the checksum manifest
+        run: |
+          if [[ -n "$MINISIGN_SECRET_KEY" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y minisign
+            printf '%s' "$MINISIGN_SECRET_KEY" > "$RUNNER_TEMP/minisign.key"
+            chmod 600 "$RUNNER_TEMP/minisign.key"
+            minisign -S -s "$RUNNER_TEMP/minisign.key" -m SHA256SUMS -x SHA256SUMS.minisig
+          elif [[ "$RELEASE_TAG" != *-rc.* ]]; then
+            echo "Stable releases require the MINISIGN_SECRET_KEY repository secret." >&2
+            exit 1
+          fi
+      - name: Publish integrity metadata
+        run: |
+          gh release upload "$RELEASE_TAG" SHA256SUMS --clobber
+          if [[ -f SHA256SUMS.minisig ]]; then
+            gh release upload "$RELEASE_TAG" SHA256SUMS.minisig --clobber
+          fi

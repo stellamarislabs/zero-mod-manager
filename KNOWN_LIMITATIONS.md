@@ -1,4 +1,81 @@
-# Known Limitations — 0.6.5
+# Known Limitations — 0.7.0-rc.7
+
+- Versions come from supplied metadata or recognized archive names. Adopted loose files
+  often have no recoverable version; the Library reports "Version not recorded".
+- Complete bundle updates stop on externally modified payloads rather than silently
+  overwriting them. Review those changes; component replacements offer explicit override.
+- No long-duration heap/handle soak or fresh cross-platform game qualification was
+  performed for RC6. Automated checks are not a leak-free or universal compatibility guarantee.
+
+- Ready means the available local preflight checks passed, not that every mod
+  has been tested in the current game session. Missing catalog/build evidence
+  and uninspected container assets cannot establish in-game compatibility.
+- Historical logs are detected by file presence; their age/content are not used
+  as automatic proof that UE4SS or a particular mod loaded successfully.
+- Saved profile selections can differ from the current deployment. Review and
+  apply saved changes before a temporary vanilla/troubleshoot session.
+- Loose existing-game files cannot prove that different loaders or similar names
+  belong to one mod. Adoption keeps those entries separate; reviewed archive
+  bundle installs still support a shared Components drawer.
+- Factory reset retains recovery folders and externally relocated library copies.
+  It clears active app-owned state, not every physical backup. Game mods become
+  unmanaged; replacement mods may require original backups rather than re-adoption.
+
+- Legacy flattened Adopt/Merge records can be recovered explicitly in Library >
+  Organize mods. Only unambiguous additive PAK/IoStore records with unchanged
+  managed/game files and compatible checkpoints are recoverable. Profiles and
+  in-app checkpoints are preserved; previously exported profile locks must be
+  exported again. Historical launch evidence is not rewritten. Old per-component
+  load ranks lost by the earlier merge cannot be reconstructed automatically.
+- Nexus integration is removed. Download archives in a browser and use Install.
+  Reassign old nxm associations in Vortex if needed.
+- Container content/asset verification is not performed. IoStore companion-file checks,
+  archive safety, file checksums and destination ownership checks remain enabled.
+- UE4SS, 7-Zip, and NanaZip are never silently bundled or downloaded.
+  0.7.0-rc.7 supports explicit local tool selection and verified local package
+  installation; the signed tool-source catalog and consent-driven official
+  downloader are a remaining Stable gate.
+- The compatibility engine accepts and verifies signed Catalog v1 envelopes,
+  but a public catalog repository, production Ed25519 key, release URL, and
+  maintainer signing procedure still need to be provisioned. Until then the
+  application reports catalog-backed compatibility as **Unverified** and uses
+  local/author-manifest evidence only.
+- English interface copy is not yet fully routed through the future
+  localization message catalog. Localization is therefore not enabled in this
+  release candidate.
+- This release candidate has automated coverage but is not a substitute for the
+  real-game qualification matrix. Steam and EA App on Windows, Linux/Proton,
+  SteamOS, migration from 0.6.5, and every supported payload family must record
+  visible game behavior or runtime/log evidence before Stable.
+- The top-60 Nexus review in `docs/NEXUS-60-MOD-AUDIT.md` is based on published
+  file trees and installation instructions. It does not grant a Verified badge
+  without the corresponding archive and a real-game result.
+- Package installation, full replacement and removal use a persistent file/SQLite
+  rollback journal. Interrupted operations restore automatically on startup, not
+  through a user-selectable recovery wizard. Recovery is blocked while the game
+  runs or when backup integrity cannot be established.
+- Complete replacement requires confirmation; omitted components are removed.
+  The explicit package target handles renamed archives. Component-only updates
+  retain their package identity but do not retire other components.
+- Package enable/disable and multi-selection cleanup currently run component
+  operations sequentially. Each component has rollback protection, but the whole
+  selection is not a single atomic transaction.
+- Recovery history is retained under `package-recovery` in application data and
+  can consume significant disk space. There is not yet an automatic retention
+  policy or cleanup UI. Do not manually change a pending `package-operation`.
+- Loose root `Engine.ini` presets remain blocked. Installing them as whole-file
+  replacements would erase unrelated settings, so they will enter support only
+  through semantic INI diff/merge and profile rollback.
+- Compatibility catalog absence never becomes a positive compatibility claim.
+  Catalog evidence remains **Unverified**; any Ready local-check status is scoped
+  to known destination overlaps and available author metadata, not all assets.
+- Launch vanilla disables only manager-owned mod payloads; runtime and unmanaged
+  files remain. Guided Isolation's second baseline is a repeatability check,
+  not an independent runtime-off versus runtime-only comparison.
+- Guided Isolation keeps hard dependencies together and uses binary subdivision,
+  but a fault that appears only when members from two different halves interact
+  may require a second manual run with a user-chosen combined subset. Results
+  are evidence levels, never an automatic accusation against a mod author.
 
 - 7z and RAR installation uses the open-source 7-Zip command-line program
   available on the host. ZIP support is built in. The tool is looked for on
@@ -7,8 +84,7 @@
   else. A missing tool produces setup guidance.
 - RAR still needs a 7-Zip build carrying the RAR codec, which many omit.
 - UE4SS can be installed from a package the user downloaded, but it is never
-  downloaded automatically. The Nexus `nxm://` handoff can download a package
-  after the user starts it on the website and configures a personal API key.
+  downloaded automatically. Download its archive in a browser.
 - UE4SS installation preserves `UE4SS-settings.ini`, `mods.txt`, `mods.json`,
   and every `load_order.txt`. A package shipping newer defaults for those will
   not replace an existing copy; remove yours first to adopt them.
@@ -25,9 +101,9 @@
 - UE4SS start order covers `mods.txt` only. BPModLoader keeps its own list in
   `BPModLoaderMod/load_order.txt` for blueprint mods, which the manager still
   preserves rather than writes, so blueprint load order stays manual.
-- An upgrade is reversible until it succeeds, not atomic afterwards. If the new
-  version deploys but recording it fails, the new files are in place and the
-  error says so; the old entry is the one left behind.
+- Recovery mechanisms differ between package, profile, runtime and config
+  operations; do not assume every application action uses the package journal.
+  Avoid editing the managed library while an operation or recovery is pending.
 - Game-folder mods are recognized from three layouts: a tree containing
   `SWZeroCompany`, a `LogicMods` blueprint pack, and a loader shim named after
   the system library it replaces (`dxgi.dll`, `dinput8.dll`, and similar) with
@@ -35,7 +111,9 @@
 - A game-folder mod is the only kind that replaces an existing file. The
   original is kept in the managed library and restored on disable or removal,
   but a file another mod already owns is never overwritten.
-- Existing-mod discovery adopts additive PAK/IoStore, UE4SS, and LogicMods.
+- Existing-mod discovery adopts additive PAK/IoStore, UE4SS, LogicMods and
+  Unreal plugin folders. It does not infer that similarly named folders belong
+  to one mod: users explicitly group the appropriate components.
   It reports but does not adopt ReShade and other replacement-style game-folder
   mods because their pre-mod originals are no longer available to back up.
 - Lua mods bundled inside a UE4SS package are treated as part of the runtime
@@ -47,8 +125,7 @@
   folder as the working directory and does not add command-line arguments. On
   Linux, select a native launcher or wrapper rather than a Windows executable
   that the host cannot run directly.
-- retoc can verify only containers supported by retoc 0.1.5. Encrypted or future
-  game container formats may require an upstream update.
+- Encrypted or future container formats are not validated by a content parser.
 - PAK-only mods cannot provide package-level overlap metadata; only destination
   filename collision is available for them.
 - Load-order management is enabled for IoStore triplets with a companion PAK,
@@ -85,56 +162,14 @@
   A folder still holding a settings file, a log, or anything else the manager
   does not own is kept, and a game-folder mod is never pruned because its base
   is the game installation itself.
-- Full profiles remain future work.
-- Update checking needs a mod to be matched to its Nexus page. A download
-  through the `nxm://` handoff records that outright. Anything else is matched
-  by offering the MD5 of the archive it was installed from, which only works
-  while that archive is still on disk and only for a file that was actually
-  uploaded to Nexus. A mod adopted from disk, installed from an archive that has
-  since been deleted, or built from source is never matched automatically and
-  has to be linked by hand from More details, or it is not checked.
-- An update is the newest file Nexus still offers under `MAIN` or `UPDATE`, and
-  newer means a higher file id, which Nexus issues in upload order. A mod that
-  publishes its releases under another category is compared against its newest
-  offered file instead; an author who re-uploads an old build under a new file
-  id is reported as an update.
-- The update check reports that a newer file exists. It never downloads or
-  installs one on its own, and a free Nexus account has to start the download
-  on the website because the API will not mint a download link without the
-  website's key.
-- Linking a mod by hand trusts the address given. The file recorded as installed
-  is the one whose version string matches the installed version, and the newest
-  offered file when no version matches, so a mod whose version was never
-  recorded is linked to the current file and reports an update only from the
-  next release onward.
-- An update check is a request per Nexus mod, plus one per unmatched archive
-  that has not been excluded, so a large library spends the hourly API allowance
-  quickly. A mod that is not published on Nexus is worth taking out of checking
-  from More details, because its archive is otherwise offered again on every
-  check the user asks for. The result stands
-  for six hours before an automatic check goes back to the network; the Mods
-  page button always does.
-- Downloads must be started from the Nexus Mods website. A non-premium account
-  cannot obtain a download link from the API without the website-minted key, so
-  no in-application browsing or search is offered.
-- Without a Secret Service provider on Linux, the Nexus API key is stored in the
-  application database as plain text. Settings reports which location is in use.
-- The `nxm://` association is claimed only when enabled in Settings, so it is
-  never taken from another mod manager silently. If another manager already
-  holds it, Settings names that application instead of failing quietly.
-- On Linux the `nxm://` desktop entry is written by this application rather
-  than by `tauri-plugin-deep-link`, which quotes `Exec`. `xdg-mime` resolves an
-  entry by passing the first whitespace-separated word of `Exec` to
-  `command -v` without stripping quotes, so a quoted path never resolves and
-  the entry is skipped silently. Paths that genuinely need quoting are reached
-  through a symbolic link instead.
-- `xdg-mime query` reads `<desktop>-mimeapps.list` before the generic
-  `mimeapps.list` when `XDG_CURRENT_DESKTOP` is set, but `xdg-mime default`
-  only writes the generic file. An application that claimed a scheme in the
-  prefixed file keeps it regardless of later registrations, so the prefixed
-  files are updated too — only where they already name the scheme, and the
-  entry is removed again when the association is handed back.
-- Release builds are unsigned. SmartScreen may warn on Windows.
+- Profiles record enabled state, package/UE4SS priority, runtime requirement,
+  notes, and lockfile identity. Save files are intentionally neither read nor
+  copied, and BPModLoader-specific ordering remains external until its public
+  on-disk contract is verified.
+- RC release builds may be unsigned and SmartScreen may warn on Windows. Release
+  CI always publishes `SHA256SUMS`; Stable is blocked unless a detached minisign
+  signature can also be produced. Authenticode remains conditional on obtaining
+  a Windows signing certificate.
 - Flatpak/Snap sandbox permissions and uncommon portable Steam installations
   may require manual game-path selection.
 - Windows artifacts are generated by GitHub Actions; they cannot be produced on

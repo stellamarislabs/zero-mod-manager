@@ -11,8 +11,9 @@ another mod manager are included.
 - Project: retoc 0.1.5
 - Repository: https://github.com/trumank/retoc
 - License: MIT
-- Use: official release binaries are bundled in release packages as a Tauri
-  sidecar and invoked for IoStore verification and package-ID enumeration.
+- Historical use: upstream used this external tool for IoStore verification.
+  Zero Mod Manager no longer discovers, invokes, or requires it. The notice is
+  retained for attribution; no executable is included in release packages.
 - Copyright: Copyright (c) 2025 Truman Kilen and Archengius
 - Required notice: the upstream MIT license text is reproduced below.
 

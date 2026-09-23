@@ -22,6 +22,8 @@ export function useSubscription(
     void subscribe().then(unsubscribe => {
       if (cancelled) unsubscribe();
       else stop = unsubscribe;
+    }).catch(error => {
+      if (!cancelled) console.error("Event subscription could not be registered.", error);
     });
     return () => {
       cancelled = true;

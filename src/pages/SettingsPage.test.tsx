@@ -10,18 +10,16 @@ afterEach(cleanup);
 const settings: AppSettings = {
   gamePath: null,
   customExecutablePath: "C:\\Games\\ZeroCompany.exe",
-  retocPath: null,
   sevenZipPath: null,
   logLevel: "normal",
   advancedPackageNames: false,
   reducedMotion: false,
-  nexusAutoUpdateCheck: false
 };
 
 function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Parameters<typeof SettingsPage>[0] {
   return {
     settings,
-    retoc: { found: true, path: "/bin/retoc", version: "retoc 0.1.5" },
+
     sevenZip: { found: true, path: "C:\\Program Files\\7-Zip\\7z.exe", version: "7-Zip 24.09" },
     managedLibrary: { path: "C:\\ZCOM Mods", defaultPath: "C:\\Users\\Arc\\AppData\\Local\\ZCOM Mods", isDefault: false },
     movingLibrary: false,
@@ -29,7 +27,6 @@ function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Par
     onSave: vi.fn(),
     onPickGame: vi.fn(),
     onPickExecutable: vi.fn(),
-    onPickRetoc: vi.fn(),
     onPickSevenZip: vi.fn(),
     onMoveLibrary: vi.fn(),
     onUseDefaultLibrary: vi.fn(),
@@ -38,12 +35,6 @@ function props(overrides: Partial<Parameters<typeof SettingsPage>[0]> = {}): Par
     onOpenData: vi.fn(),
     links: { ue4ssDownload: "", nexusGame: "", nexusManager: "", project: "" },
     onOpenLink: vi.fn(),
-    nexus: null,
-    nexusAccount: null,
-    onSaveNexusKey: vi.fn(),
-    onClearNexusKey: vi.fn(),
-    onToggleNxmHandler: vi.fn(),
-    onSetAutoUpdateCheck: vi.fn(),
     ...overrides
   };
 }
@@ -86,30 +77,28 @@ describe("managed mod library", () => {
   });
 });
 
-describe("Nexus update checking", () => {
-  it("saves the moment it is set, without waiting for Save settings", async () => {
-    // Every other control in this panel applies at once, and an unsaved toggle
-    // was also discarded by the next refresh, so it looked like it never stuck.
-    const onSetAutoUpdateCheck = vi.fn().mockResolvedValue(undefined);
-    const onChange = vi.fn();
-    const onSave = vi.fn();
-    render(<SettingsPage {...props({ onSetAutoUpdateCheck, onChange, onSave })} />);
-    const check = screen.getByRole("checkbox", { name: /Check installed mods for updates/ });
-    expect((check as HTMLInputElement).checked).toBe(false);
-    await userEvent.click(check);
-    expect(onSetAutoUpdateCheck).toHaveBeenCalledWith(true);
-    expect(onSave).not.toHaveBeenCalled();
-    expect(onChange).not.toHaveBeenCalled();
+describe("local tools", () => {
+  it("does not describe an unavailable tool check as not installed", () => {
+    render(<SettingsPage {...props({ sevenZip: null })} />);
+    expect(screen.getByText("Tool status unavailable.")).toBeTruthy();
+    expect(screen.queryByText("Not found. Install an extracted folder instead.")).toBeNull();
   });
-
-  it("shows the stored state when the page opens", () => {
-    render(<SettingsPage {...props({ settings: { ...settings, nexusAutoUpdateCheck: true } })} />);
-    const check = screen.getByRole("checkbox", { name: /Check installed mods for updates/ });
-    expect((check as HTMLInputElement).checked).toBe(true);
+  it("has no account, API or container-tool controls", () => {
+    render(<SettingsPage {...props()} />);
+    expect(screen.queryByText(/API key/i)).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /Check installed mods for updates/ })).toBeNull();
+    expect(screen.queryByRole("heading", { name: /Container verification/ })).toBeNull();
   });
+});
 
-  it("names the account a stored key belongs to after a restart", () => {
-    render(<SettingsPage {...props({ nexus: { hasKey: true, accountName: "Arc", premium: true, storage: "keyring", handlerRegistered: true, handlerOwner: null, handlerProblem: null } })} />);
-    expect(screen.getByText("Connected as Arc · premium account")).toBeDefined();
+describe("factory reset settings", () => {
+  it("offers a manager-only reset when connected and prevents it during a library move", async () => {
+    const onFactoryReset = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(<SettingsPage {...props({ onFactoryReset })} />);
+    expect(screen.getByRole("heading", { name: "Factory reset" })).toBeTruthy();
+    expect(screen.getByText(/Installed game mods and saves are kept/)).toBeTruthy();
+    expect(onFactoryReset).not.toHaveBeenCalled();
+    rerender(<SettingsPage {...props({ onFactoryReset, movingLibrary: true })} />);
+    expect((screen.getByRole("button", { name: "Reset app data…" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

@@ -6,7 +6,7 @@
 //! retains a database backup before replacing the empty continuation state.
 
 use crate::{
-    credentials, database, deployment,
+    database, deployment,
     error::{AppError, Result},
     AppContext,
 };
@@ -191,7 +191,73 @@ fn backup_database(source: &Connection, destination: &mut Connection) -> Result<
     Ok(())
 }
 
-pub fn import(ctx: &AppContext, include_nexus_key: bool) -> Result<LegacyImportReport> {
+/// Creates the one-time, byte-verified safety copy required before the 0.7
+/// operational schema can touch a 0.6.x database. The marker is written only
+/// after both the SQLite backup and managed source library are complete.
+pub fn backup_operational_upgrade(
+    database_path: &Path,
+    data_dir: &Path,
+    default_library: &Path,
+) -> Result<Option<PathBuf>> {
+    if !database_path.is_file() {
+        return Ok(None);
+    }
+    let marker = data_dir.join("operational-upgrade-backup.txt");
+    if marker.is_file() {
+        let saved = PathBuf::from(fs::read_to_string(&marker)?.trim());
+        if saved.join("database.sqlite3").is_file() {
+            return Ok(Some(saved));
+        }
+        return Err(AppError::Other("The recorded pre-0.7 backup is missing. Restore it or remove the stale marker before retrying the upgrade.".into()));
+    }
+    let source = open_read_only(database_path)?;
+    let version = source
+        .query_row(
+            "SELECT coalesce(max(version),0) FROM schema_migrations",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    if version >= 8 {
+        return Ok(None);
+    }
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let root = data_dir
+        .join("migration-backups")
+        .join(format!("pre-0.7-{stamp}"));
+    fs::create_dir_all(&root)?;
+    let mut database_backup = Connection::open(root.join("database.sqlite3"))?;
+    backup_database(&source, &mut database_backup)?;
+
+    let configured = database::get_setting(&source, "managed_library_path")?
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    let legacy_local = data_dir.join("mods");
+    let library = configured.unwrap_or_else(|| {
+        if legacy_local.is_dir() {
+            legacy_local
+        } else {
+            default_library.to_path_buf()
+        }
+    });
+    let (files, bytes) = if library.is_dir() {
+        copy_verified(&library, &root.join("managed-library"))?
+    } else {
+        (0, 0)
+    };
+    fs::write(
+        root.join("backup.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schemaVersion": 1, "createdAt": Utc::now().to_rfc3339(),
+            "sourceSchema": version, "libraryFiles": files, "libraryBytes": bytes,
+            "originalDatabase": database_path, "originalLibrary": library,
+        }))?,
+    )?;
+    fs::write(&marker, root.display().to_string())?;
+    Ok(Some(root))
+}
+
+pub fn import(ctx: &AppContext, _include_nexus_key: bool) -> Result<LegacyImportReport> {
     let state = status(ctx)?;
     if !state.available || !state.can_import {
         return Err(AppError::Other(
@@ -203,24 +269,6 @@ pub fn import(ctx: &AppContext, include_nexus_key: bool) -> Result<LegacyImportR
     let legacy_data = PathBuf::from(state.data_directory.as_deref().unwrap_or_default());
     let legacy_library = PathBuf::from(state.library_directory.as_deref().unwrap_or_default());
     let legacy = open_read_only(&legacy_data.join(LEGACY_DATABASE))?;
-    let nexus_key = include_nexus_key
-        .then(|| credentials::load_legacy(&legacy))
-        .flatten();
-    let nexus_account = include_nexus_key
-        .then(|| {
-            database::get_setting(&legacy, "nexus_account_name")
-                .ok()
-                .flatten()
-        })
-        .flatten();
-    let nexus_premium = include_nexus_key
-        .then(|| {
-            database::get_setting(&legacy, "nexus_premium")
-                .ok()
-                .flatten()
-        })
-        .flatten();
-
     let stage = ctx
         .data_dir
         .join(format!(".legacy-library-import-{}", Uuid::new_v4()));
@@ -266,15 +314,6 @@ pub fn import(ctx: &AppContext, include_nexus_key: bool) -> Result<LegacyImportR
         for setting in ["nexus_api_key", "nexus_account_name", "nexus_premium"] {
             database::delete_setting(&current, setting)?;
         }
-        if let Some(key) = nexus_key.as_deref() {
-            credentials::store(&current, key)?;
-            if let Some(account) = nexus_account.as_deref() {
-                database::set_setting(&current, "nexus_account_name", account)?;
-            }
-            if let Some(premium) = nexus_premium.as_deref() {
-                database::set_setting(&current, "nexus_premium", premium)?;
-            }
-        }
         drop(current);
 
         if ctx.default_mods_dir.exists() {
@@ -300,7 +339,7 @@ pub fn import(ctx: &AppContext, include_nexus_key: bool) -> Result<LegacyImportR
         imported_mods: state.mod_count,
         copied_files,
         copied_bytes,
-        nexus_key_imported: nexus_key.is_some(),
+        nexus_key_imported: false,
         backup_path: backup_path.to_string_lossy().into_owned(),
     })
 }
@@ -345,5 +384,50 @@ mod tests {
             .query_row("SELECT value FROM sample", [], |row| row.get(0))
             .unwrap();
         assert_eq!(value, "legacy");
+    }
+
+    #[test]
+    fn operational_upgrade_creates_a_verified_one_time_backup() {
+        let root = tempdir().unwrap();
+        let data_dir = root.path().join("data");
+        let library = root.path().join("managed-library");
+        let database_path = data_dir.join("zcom-mod-manager.sqlite3");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::create_dir_all(library.join("example")).unwrap();
+        fs::write(library.join("example/payload.pak"), b"managed payload").unwrap();
+        {
+            let source = Connection::open(&database_path).unwrap();
+            source
+                .execute_batch(
+                    "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);\
+                     INSERT INTO schema_migrations VALUES(7);\
+                     CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+                )
+                .unwrap();
+            database::set_setting(&source, "managed_library_path", &library.to_string_lossy())
+                .unwrap();
+        }
+
+        let backup = backup_operational_upgrade(&database_path, &data_dir, root.path())
+            .unwrap()
+            .unwrap();
+
+        assert!(backup.join("database.sqlite3").is_file());
+        assert_eq!(
+            fs::read(backup.join("managed-library/example/payload.pak")).unwrap(),
+            b"managed payload"
+        );
+        let copied = Connection::open(backup.join("database.sqlite3")).unwrap();
+        let version: i64 = copied
+            .query_row("SELECT max(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 7);
+
+        let repeated = backup_operational_upgrade(&database_path, &data_dir, root.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(repeated, backup);
     }
 }

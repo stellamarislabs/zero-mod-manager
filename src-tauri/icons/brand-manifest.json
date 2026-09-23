@@ -1,0 +1,12 @@
+{
+  "source": "src/assets/icon.svg",
+  "sourceSha256": "2d327377451cd9839f3a2f29bd4343253a29fca67386e0888c27429e9db2ff70",
+  "icoSha256": "dcff123d7c330fba85b981a293c13f8fc2502b3c3354d1c19ef7a2400ef8cb1a",
+  "resourceName": "zero-brand-dcff123d7c33.ico",
+  "frames": {
+    "32x32.png": "025f0a1abdc528529dfef0c73e3c4f1a7d44f00a2158165b44a89898aefde07f",
+    "64x64.png": "598e3220d7fe9bab616138c6bc25cbbb0bdc79e0c2275c42f99a2d7c4b5dfe0e",
+    "128x128.png": "f6d43f755abc310964c95019ca77784441c62856419041c63fdf18240728d07e",
+    "128x128@2x.png": "1f7f333ad408f4e28e31f9e08c4ee3d1d71911dd3f409784150a3d275a8788e7"
+  }
+}
